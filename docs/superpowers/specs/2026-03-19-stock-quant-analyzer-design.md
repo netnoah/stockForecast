@@ -2,11 +2,12 @@
 
 ## Overview
 
-A command-line tool for A-share stock analysis that predicts next-day up/down probability using technical indicators, provides a comprehensive analysis report, and tracks historical prediction accuracy through a self-reflection mechanism.
+A command-line tool for A-share stock analysis that predicts next-day or intraday up/down probability using technical indicators, provides a comprehensive analysis report, and tracks historical prediction accuracy through a self-reflection mechanism.
 
 ## Requirements
 
 - Command-line interface, support multiple stocks per run
+- Auto-detect trading hours: intraday real-time analysis vs after-hours next-day prediction
 - Multi-source data fetching with automatic fallback (akshare → Sina)
 - Local CSV cache with incremental updates (3 years initial fetch)
 - Extended technical indicators: MA, MACD, RSI, Bollinger Bands, KDJ, volume analysis
@@ -56,6 +57,57 @@ date,open,high,low,close,volume
 2023-03-20,12.50,12.80,12.40,12.70,500000
 2023-03-21,12.70,12.90,12.60,12.85,550000
 ```
+
+## Intraday Real-Time Analysis
+
+### Trading Hours Detection
+
+A-share market hours: Monday-Friday, 9:30-15:00 (including lunch break 11:30-13:00).
+
+```python
+def is_trading_hours() -> bool:
+    now = datetime.now()
+    # Weekend check
+    if now.weekday() >= 5:
+        return False
+    # Morning session: 9:30-11:30
+    # Afternoon session: 13:00-15:00
+    return (9.5 <= now.hour + now.minute/60 <= 11.5 or
+            13.0 <= now.hour + now.minute/60 <= 15.0)
+```
+
+### Mode Switching
+
+| Condition | Mode | Prediction Target | Data Source |
+|-----------|------|-------------------|-------------|
+| Trading hours (9:30-15:00, weekday) | Intraday | Today's closing trend | Historical + real-time quote |
+| Outside trading hours | Daily | Next-day trend | Historical data only |
+
+### Intraday Data Merge
+
+When in intraday mode:
+1. Fetch real-time quote (current price, today's open/high/low/volume) via Sina real-time API
+2. Check if today's date already exists in local history cache
+3. If not, append today's real-time data as the latest row (marked as intraday, not final)
+4. Run all indicators on the merged dataset
+5. The latest candle is intraday (incomplete), so indicator values are approximate — the report should note this
+
+### Intraday-Specific Report Section
+
+```
+--- Real-Time Status ---
+Current: 12.35 | Open: 12.10 | High: 12.50 | Low: 12.05
+Intraday position: upper region (82nd percentile of daily range)
+
+[Intraday Prediction] Leaning towards close higher (68%)
+```
+
+During intraday mode:
+- Report title shows current time: `2026-03-19 14:30`
+- Adds `[Trading Session] Intraday real-time analysis` label
+- Shows today's OHLC and intraday position
+- Prediction label changes from "Next-day up probability" to "Today's close prediction"
+- Risk alerts include intraday-specific warnings (e.g., "approaching intraday high, may face selling pressure")
 
 ## Technical Indicators
 
@@ -166,6 +218,8 @@ Market modifier: +10 (3/4 indices bullish)
 
 ## Analysis Report Format
 
+### After-Hours Report (next-day prediction)
+
 ```
 ========================================
   Stock Analysis Report | 002602 | 2026-03-19
@@ -173,7 +227,7 @@ Market modifier: +10 (3/4 indices bullish)
 Current Price: 12.35  Change: +1.23%
 
 [Signal Rating] Buy
-[Up Probability] 68%
+[Next-Day Up Probability] 68%
 
 --- Broad Market Environment ---
 ✅ Shanghai Composite: above MA20, MACD bullish
@@ -193,6 +247,50 @@ Market modifier: +10 (3/4 indices bullish)
 --- Risk Alerts ---
 ⚠️ RSI approaching 70 overbought line, watch for short-term pullback
 ⚠️ Close to Bollinger upper band, limited upside room
+
+--- Key Levels ---
+Support: 11.80 (MA20) / 11.50 (Bollinger lower band)
+Resistance: 12.80 (Bollinger upper band) / 13.10 (Previous high)
+
+--- Position Advice ---
+Suggested: 30% (bullish signal but near resistance, avoid heavy position)
+```
+
+### Intraday Report (during trading hours)
+
+```
+========================================
+  Stock Analysis Report | 002602 | 2026-03-19 14:30
+========================================
+Current Price: 12.35  Today's Change: +1.23%
+[Trading Session] Intraday real-time analysis
+
+[Signal Rating] Buy
+[Today Close Prediction] Leaning towards close higher (68%)
+
+--- Real-Time Status ---
+Current: 12.35 | Open: 12.10 | High: 12.50 | Low: 12.05
+Intraday position: upper region (82nd percentile of daily range)
+
+--- Broad Market Environment ---
+✅ Shanghai Composite: above MA20, MACD bullish
+✅ Shenzhen Component: above MA20, MACD bullish
+❌ ChiNext: below MA20, MACD bearish
+✅ CSI 500: above MA20, MACD bullish
+Market modifier: +10 (3/4 indices bullish)
+
+--- Technical Indicators ---
+✅ MA: MA5>MA10>MA20 bullish alignment (+15)
+✅ MACD: DIF crosses above DEA, golden cross formed (+12)
+⚠️ RSI: 65.3, approaching overbought zone (+5)
+✅ Bollinger: Price running above middle band (+10)
+✅ KDJ: J value 42, neutral-slightly bullish zone (+6)
+✅ Volume: Volume 23% above 5-day average (+11)
+⚠️ Note: Latest candle is intraday (incomplete), indicator values are approximate
+
+--- Risk Alerts ---
+⚠️ RSI approaching 70 overbought line, watch for short-term pullback
+⚠️ Approaching intraday high, may face selling pressure before close
 
 --- Key Levels ---
 Support: 11.80 (MA20) / 11.50 (Bollinger lower band)
