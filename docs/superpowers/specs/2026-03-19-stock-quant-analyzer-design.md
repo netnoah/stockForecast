@@ -70,6 +70,58 @@ All indicators calculated using pandas + numpy. No external TA libraries.
 | **KDJ** | K=9, D=3, J=3 | J value oversold golden cross = bullish. J value overbought death cross = bearish |
 | **Volume Analysis** | 5-day avg volume | Volume increases with price rise = bullish. Volume-price divergence = warning. Volume spike on decline = bearish |
 
+## Broad Market Index Factor
+
+### Rationale
+
+A-share stocks are highly correlated with broad market trends. Individual stock technical analysis is insufficient without market context — even strong individual stocks tend to decline in a bearish broad market.
+
+### Index Coverage
+
+| Index | Code | Represents |
+|-------|------|------------|
+| Shanghai Composite | sh000001 | Overall Shanghai market |
+| Shenzhen Component | sz399001 | Overall Shenzhen market |
+| ChiNext | sz399006 | Growth / tech stocks |
+| CSI 500 | sh000905 | Mid-cap stocks |
+
+### Data Strategy
+
+Index data uses the same incremental cache mechanism as individual stocks. Fetched via `data_source.py` and cached in `data/history/`.
+
+### Market Modifier Logic
+
+The broad market acts as a **modifier** applied to the individual stock score, not as a weighted indicator:
+
+```
+final_score = stock_indicator_score + market_modifier
+```
+
+Market modifier scoring:
+
+| Condition | Modifier | Description |
+|-----------|----------|-------------|
+| 3+ indices bullish (price > MA20, MACD bullish) | +10 to +15 | Broad market strong uptrend |
+| 2 indices bullish, rest neutral | +3 to +8 | Mildly positive market |
+| Indices mixed, no clear direction | -3 to +3 | Neutral market |
+| 2+ indices bearish | -8 to -3 | Mildly negative market |
+| 3+ indices bearish (price < MA20, MACD bearish) | -15 to -8 | Broad market strong downtrend |
+
+The modifier is calculated using the same MA/MACD indicators applied to each index, producing a simple bullish/bearish/neutral classification per index, then aggregated.
+
+### Report Section
+
+A new "Broad Market" section appears in the report:
+
+```
+--- Broad Market Environment ---
+✅ Shanghai Composite: above MA20, MACD bullish
+✅ Shenzhen Component: above MA20, MACD bullish
+❌ ChiNext: below MA20, MACD bearish
+✅ CSI 500: above MA20, MACD bullish
+Market modifier: +10 (3/4 indices bullish)
+```
+
 ## Scoring System
 
 ### Mechanism
@@ -77,6 +129,7 @@ All indicators calculated using pandas + numpy. No external TA libraries.
 - Base score: 50 (neutral)
 - Each indicator contributes a score in range [-20, +20]
 - Weighted sum using weights from config.json
+- Apply broad market modifier (range [-15, +15])
 - Final score clamped to [10, 90] as up-probability percentage
 
 ### Signal Rating
@@ -102,6 +155,11 @@ All indicators calculated using pandas + numpy. No external TA libraries.
     "volume": { "enabled": true, "weight": 15 },
     "kdj": { "enabled": true, "weight": 10 },
     "pattern": { "enabled": true, "weight": 10 }
+  },
+  "market_modifier": {
+    "enabled": true,
+    "max_impact": 15,
+    "indices": ["sh000001", "sz399001", "sz399006", "sh000905"]
   }
 }
 ```
@@ -116,6 +174,13 @@ Current Price: 12.35  Change: +1.23%
 
 [Signal Rating] Buy
 [Up Probability] 68%
+
+--- Broad Market Environment ---
+✅ Shanghai Composite: above MA20, MACD bullish
+✅ Shenzhen Component: above MA20, MACD bullish
+❌ ChiNext: below MA20, MACD bearish
+✅ CSI 500: above MA20, MACD bullish
+Market modifier: +10 (3/4 indices bullish)
 
 --- Technical Indicators ---
 ✅ MA: MA5>MA10>MA20 bullish alignment (+15)
