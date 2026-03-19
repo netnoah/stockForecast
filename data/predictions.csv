@@ -10,3 +10,4 @@ date,symbol,price,signal,score,pred_up_prob,actual_change,hit
 2026-03-19,002602,16.65,Sell,34,34,,
 2026-03-19,600519,1452.87,Sell,36,36,,
 2026-03-19,000001,10.88,Sell,38,38,,
+2026-03-19,002602,16.65,Sell,34,34,,
