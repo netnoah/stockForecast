@@ -3,7 +3,7 @@ import os
 from datetime import datetime
 
 _PREDICTIONS_FILE = os.path.join(os.path.dirname(os.path.abspath(__file__)), "data", "predictions.csv")
-_FIELDS = ["date", "symbol", "price", "signal", "score", "pred_up_prob", "actual_change", "hit"]
+_FIELDS = ["date", "symbol", "name", "price", "signal", "score", "pred_up_prob", "actual_change", "hit"]
 
 
 def _ensure_file() -> None:
@@ -16,14 +16,15 @@ def _ensure_file() -> None:
             writer.writeheader()
 
 
-def record_prediction(symbol: str, price: float, signal: str, score: int, prob: int) -> None:
+def record_prediction(symbol: str, name: str, price: float, signal: str, score: int, prob: int) -> None:
     """
     Write a new row to predictions.csv.
 
     Args:
         symbol: Stock symbol (e.g., '002602')
+        name: Stock Chinese name (e.g., '世纪华通')
         price: Prediction price
-        signal: Trading signal (Strong Buy, Buy, Hold, Sell, Strong Sell)
+        signal: Trading signal
         score: Analysis score (0-100)
         prob: Predicted upward probability (0-100)
     """
@@ -36,6 +37,7 @@ def record_prediction(symbol: str, price: float, signal: str, score: int, prob: 
         writer.writerow({
             "date": today,
             "symbol": symbol,
+            "name": name,
             "price": f"{price:.2f}",
             "signal": signal,
             "score": score,
@@ -43,6 +45,22 @@ def record_prediction(symbol: str, price: float, signal: str, score: int, prob: 
             "actual_change": "",
             "hit": ""
         })
+
+
+def _migrate_predictions(predictions: list[dict], fetch_name_fn) -> list[dict]:
+    """Backfill missing 'name' field for old predictions and re-save."""
+    from data_source import get_stock_name
+    changed = False
+    for pred in predictions:
+        if not pred.get("name") or not pred["name"].strip():
+            pred["name"] = get_stock_name(pred["symbol"])
+            changed = True
+    if changed:
+        with open(_PREDICTIONS_FILE, 'w', newline='', encoding='utf-8') as f:
+            writer = csv.DictWriter(f, fieldnames=_FIELDS)
+            writer.writeheader()
+            writer.writerows(predictions)
+    return predictions
 
 
 def read_predictions() -> list[dict]:
@@ -59,7 +77,9 @@ def read_predictions() -> list[dict]:
 
     with open(_PREDICTIONS_FILE, 'r', encoding='utf-8') as f:
         reader = csv.DictReader(f)
-        return list(reader)
+        predictions = list(reader)
+
+    return _migrate_predictions(predictions, None)
 
 
 def backfill_predictions(fetch_actual_fn) -> int:
@@ -118,6 +138,18 @@ def backfill_predictions(fetch_actual_fn) -> int:
     return backfill_count
 
 
+def _normalize_signal(signal: str) -> str:
+    """Normalize English signal names from old CSV data to Chinese."""
+    _en_to_cn = {
+        "Strong Buy": "强烈买入",
+        "Buy": "买入",
+        "Hold": "观望",
+        "Sell": "卖出",
+        "Strong Sell": "强烈卖出",
+    }
+    return _en_to_cn.get(signal, signal)
+
+
 def _calculate_hit(signal: str, actual_change: float) -> bool:
     """
     Determine if a prediction was a hit.
@@ -130,10 +162,11 @@ def _calculate_hit(signal: str, actual_change: float) -> bool:
         True if prediction was correct, False otherwise.
     """
     actual_up = actual_change > 0
+    normalized = _normalize_signal(signal)
 
-    if signal in ("Strong Buy", "Buy"):
+    if normalized in ("强烈买入", "买入"):
         return actual_up
-    elif signal in ("Strong Sell", "Sell"):
+    elif normalized in ("强烈卖出", "卖出"):
         return not actual_up
     else:  # Hold
         # Hold signals always count as miss per specification
@@ -180,11 +213,11 @@ def calculate_accuracy() -> dict:
     overall = (hits / verified_count) * 100
 
     # Calculate by signal
-    signals = ["Strong Buy", "Buy", "Hold", "Sell", "Strong Sell"]
+    signals = ["强烈买入", "买入", "观望", "卖出", "强烈卖出"]
     by_signal = {}
 
     for signal in signals:
-        signal_preds = [p for p in verified if p["signal"] == signal]
+        signal_preds = [p for p in verified if _normalize_signal(p["signal"]) == signal]
         if signal_preds:
             signal_total = len(signal_preds)
             signal_hits = sum(1 for p in signal_preds if p["hit"] == "1")
@@ -212,20 +245,20 @@ def format_accuracy_report(stats: dict) -> str:
     Returns:
         Formatted string report.
     """
-    lines = ["--- Prediction Self-Reflection ---"]
+    lines = ["--- 预测自检报告 ---"]
 
-    lines.append(f"Total predictions: {stats['total']}")
-    lines.append(f"Verified samples: {stats['verified']}")
+    lines.append(f"总预测次数: {stats['total']}")
+    lines.append(f"已验证样本: {stats['verified']}")
 
     if stats['verified'] == 0:
-        lines.append("No verified predictions yet.")
+        lines.append("暂无已验证的预测记录。")
         return "\n".join(lines)
 
     verified = stats['verified']
     overall = stats['overall']
     hits = sum(s['hits'] for s in stats['by_signal'].values())
 
-    lines.append(f"Overall accuracy: {hits}/{verified} ({overall:.1f}%)")
+    lines.append(f"整体准确率: {hits}/{verified} ({overall:.1f}%)")
     lines.append("")
 
     # Format each signal
@@ -233,6 +266,6 @@ def format_accuracy_report(stats: dict) -> str:
         signal_hits = signal_stats['hits']
         signal_total = signal_stats['total']
         accuracy = signal_stats['accuracy']
-        lines.append(f"  {signal} accuracy: {signal_hits}/{signal_total} ({accuracy:.1f}%)")
+        lines.append(f"  {signal} 准确率: {signal_hits}/{signal_total} ({accuracy:.1f}%)")
 
     return "\n".join(lines)

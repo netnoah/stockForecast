@@ -63,20 +63,28 @@ def _cache_path(filename: str) -> str:
 
 
 def _read_cache(filepath: str) -> pd.DataFrame | None:
-    """Read a cached CSV file into a DataFrame, or return None if not found."""
+    """Read a cached CSV file into a DataFrame, or return None if not found.
+
+    Returns data sorted ascending by date (for indicator calculations).
+    If the on-disk file is in ascending order, re-saves it as descending.
+    """
     if not os.path.isfile(filepath):
         return None
     try:
-        return pd.read_csv(filepath, parse_dates=["date"])
+        df = pd.read_csv(filepath, parse_dates=["date"])
+        if not df.empty and df["date"].iloc[0] < df["date"].iloc[-1]:
+            _save_cache(df, filepath)
+        return df.sort_values("date").reset_index(drop=True)
     except Exception:
         return None
 
 
 def _save_cache(df: pd.DataFrame, filepath: str) -> None:
-    """Save a DataFrame to a CSV cache file."""
+    """Save a DataFrame to a CSV cache file, sorted by date descending."""
     df = df.copy()
     # Ensure date is string in YYYY-MM-DD format for CSV
     df["date"] = pd.to_datetime(df["date"]).dt.strftime("%Y-%m-%d")
+    df = df.sort_values("date", ascending=False).reset_index(drop=True)
     df.to_csv(filepath, index=False, columns=_CSV_COLUMNS)
 
 
@@ -169,6 +177,32 @@ def _dedup_and_sort(df: pd.DataFrame) -> pd.DataFrame:
 # ---------------------------------------------------------------------------
 
 
+def _stock_cache_path(symbol: str) -> str:
+    """Return the cache CSV path for a stock, including Chinese name in filename.
+
+    Falls back to old naming (code-only) if the name cannot be retrieved,
+    and migrates old files to the new naming convention.
+    """
+    prefix = _exchange_prefix(symbol)
+    full_code = f"{prefix}{symbol}"
+    name = get_stock_name(symbol)
+
+    new_cache_file = f"{full_code}_{name}.csv"
+    new_filepath = _cache_path(new_cache_file)
+
+    old_cache_file = f"{full_code}.csv"
+    old_filepath = _cache_path(old_cache_file)
+
+    # Migrate old file to new name if it exists
+    if os.path.isfile(old_filepath) and not os.path.isfile(new_filepath):
+        try:
+            os.rename(old_filepath, new_filepath)
+        except OSError:
+            pass
+
+    return new_filepath
+
+
 def get_stock_history(symbol: str, refresh: bool = False) -> pd.DataFrame:
     """Get historical daily OHLCV data for a stock.
 
@@ -181,8 +215,7 @@ def get_stock_history(symbol: str, refresh: bool = False) -> pd.DataFrame:
     """
     prefix = _exchange_prefix(symbol)
     full_code = f"{prefix}{symbol}"
-    cache_file = f"{full_code}.csv"
-    cache_filepath = _cache_path(cache_file)
+    cache_filepath = _stock_cache_path(symbol)
 
     if not refresh:
         cached = _read_cache(cache_filepath)
@@ -217,7 +250,7 @@ def get_realtime_quote(symbol: str) -> dict | None:
         symbol: Numeric stock code (e.g. '002602').
 
     Returns:
-        Dict with keys: date, open, high, low, close, volume.
+        Dict with keys: date, open, high, low, close, volume, name.
         Returns None if the quote cannot be retrieved.
     """
     prefix = _exchange_prefix(symbol)
@@ -228,7 +261,7 @@ def get_realtime_quote(symbol: str) -> dict | None:
         resp = requests.get(url, headers=_SINA_HEADERS, timeout=10)
         resp.raise_for_status()
         content = resp.text
-        # Parse: var hq_str_sz002602="...,open,prev_close,now,high,low,..."
+        # Parse: var hq_str_sz002602="股票名,open,prev_close,now,high,low,..."
         parts = content.split('"')
         if len(parts) < 2:
             return None
@@ -242,9 +275,36 @@ def get_realtime_quote(symbol: str) -> dict | None:
             "low": float(fields[5]),
             "close": float(fields[3]),
             "volume": float(fields[8]),
+            "name": fields[0],
         }
     except Exception:
         return None
+
+
+def get_stock_name(symbol: str) -> str:
+    """Get the Chinese name of a stock via Sina Finance API.
+
+    Args:
+        symbol: Numeric stock code (e.g. '002602').
+
+    Returns:
+        Stock name string, or the symbol code itself on failure.
+    """
+    prefix = _exchange_prefix(symbol)
+    full_code = f"{prefix}{symbol}"
+    url = _SINA_REALTIME_URL.format(full_code=full_code)
+
+    try:
+        resp = requests.get(url, headers=_SINA_HEADERS, timeout=10)
+        resp.raise_for_status()
+        content = resp.text
+        parts = content.split('"')
+        if len(parts) < 2:
+            return symbol
+        name = parts[1].split(",")[0]
+        return name if name else symbol
+    except Exception:
+        return symbol
 
 
 def get_index_history(index_code: str, refresh: bool = False) -> pd.DataFrame:

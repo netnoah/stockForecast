@@ -24,21 +24,30 @@ from indicators import calc_ma, calc_macd
 # ---------------------------------------------------------------------------
 
 SIGNAL_RATINGS = [
-    (75, 90, "Strong Buy"),
-    (60, 74, "Buy"),
-    (45, 59, "Hold"),
-    (30, 44, "Sell"),
-    (10, 29, "Strong Sell"),
+    (75, 90, "强烈买入"),
+    (60, 74, "买入"),
+    (45, 59, "观望"),
+    (30, 44, "卖出"),
+    (10, 29, "强烈卖出"),
 ]
+
+# Backward compatibility: English signal names from old CSV data
+_SIGNAL_EN_MAP = {
+    "Strong Buy": "强烈买入",
+    "Buy": "买入",
+    "Hold": "观望",
+    "Sell": "卖出",
+    "Strong Sell": "强烈卖出",
+}
 
 _SCORE_MIN = -20
 _SCORE_MAX = 20
 
 INDEX_NAMES = {
-    "sh000001": "Shanghai Composite",
-    "sz399001": "Shenzhen Component",
-    "sz399006": "ChiNext",
-    "sh000905": "CSI 500",
+    "sh000001": "上证综指",
+    "sz399001": "深证成指",
+    "sz399006": "创业板指",
+    "sh000905": "中证500",
 }
 
 
@@ -112,7 +121,7 @@ def score_ma(df: pd.DataFrame) -> tuple[int, str]:
         (score, reason) tuple.
     """
     if len(df) < 2:
-        return (0, "insufficient data")
+        return (0, "数据不足")
 
     latest = df.iloc[-1]
     ma5 = _safe(latest.get("ma5"))
@@ -121,7 +130,7 @@ def score_ma(df: pd.DataFrame) -> tuple[int, str]:
     close = _safe(latest.get("close"))
 
     if any(v is None for v in (ma5, ma10, ma20, close)):
-        return (0, "MA data incomplete (NaN)")
+        return (0, "MA数据不完整 (NaN)")
 
     parts = []
     total = 0
@@ -129,20 +138,20 @@ def score_ma(df: pd.DataFrame) -> tuple[int, str]:
     # MA alignment
     if ma5 > ma10 > ma20:
         total += 10
-        parts.append("bullish alignment (MA5>MA10>MA20) +10")
+        parts.append("多头排列 (MA5>MA10>MA20) +10")
     elif ma5 < ma10 < ma20:
         total -= 10
-        parts.append("bearish alignment (MA5<MA10<MA20) -10")
+        parts.append("空头排列 (MA5<MA10<MA20) -10")
     else:
-        parts.append("mixed MA alignment 0")
+        parts.append("均线交织 0")
 
     # Price vs MA20
     if close > ma20:
         total += 5
-        parts.append("close above MA20 +5")
+        parts.append("收盘价在MA20上方 +5")
     else:
         total -= 5
-        parts.append("close below MA20 -5")
+        parts.append("收盘价在MA20下方 -5")
 
     return (_clamp(total), "; ".join(parts))
 
@@ -164,7 +173,7 @@ def score_macd(df: pd.DataFrame) -> tuple[int, str]:
         (score, reason) tuple.
     """
     if len(df) < 2:
-        return (0, "insufficient data")
+        return (0, "数据不足")
 
     prev = df.iloc[-2]
     latest = df.iloc[-1]
@@ -177,7 +186,7 @@ def score_macd(df: pd.DataFrame) -> tuple[int, str]:
     last_hist = _safe(latest.get("macd"))
 
     if any(v is None for v in (prev_dif, prev_dea, prev_hist, last_dif, last_dea, last_hist)):
-        return (0, "MACD data incomplete (NaN)")
+        return (0, "MACD数据不完整 (NaN)")
 
     parts = []
     total = 0
@@ -185,35 +194,35 @@ def score_macd(df: pd.DataFrame) -> tuple[int, str]:
     # Golden cross
     if prev_dif <= prev_dea and last_dif > last_dea:
         total += 15
-        parts.append("golden cross (DIF crosses above DEA) +15")
+        parts.append("金叉 (DIF上穿DEA) +15")
 
     # Death cross
     if prev_dif >= prev_dea and last_dif < last_dea:
         total -= 15
-        parts.append("death cross (DIF crosses below DEA) -15")
+        parts.append("死叉 (DIF下穿DEA) -15")
 
     # Histogram turns positive
     if prev_hist <= 0 and last_hist > 0:
         total += 8
-        parts.append("histogram turns positive +8")
+        parts.append("柱状图转正 +8")
 
     # Histogram turns negative
     if prev_hist >= 0 and last_hist < 0:
         total -= 8
-        parts.append("histogram turns negative -8")
+        parts.append("柱状图转负 -8")
 
     # Histogram increasing while positive
     if last_hist > 0 and last_hist > prev_hist:
         total += 5
-        parts.append("histogram increasing while positive +5")
+        parts.append("柱状图正值增大 +5")
 
     # Histogram decreasing while negative
     if last_hist < 0 and last_hist < prev_hist:
         total -= 5
-        parts.append("histogram decreasing while negative -5")
+        parts.append("柱状图负值增大 -5")
 
     if not parts:
-        parts.append("no MACD signal 0")
+        parts.append("无MACD信号 0")
 
     return (_clamp(total), "; ".join(parts))
 
@@ -232,23 +241,23 @@ def score_rsi(df: pd.DataFrame) -> tuple[int, str]:
         (score, reason) tuple.
     """
     if len(df) < 1:
-        return (0, "insufficient data")
+        return (0, "数据不足")
 
     latest = df.iloc[-1]
     rsi = _safe(latest.get("rsi"))
 
     if rsi is None:
-        return (0, "RSI data incomplete (NaN)")
+        return (0, "RSI数据不完整 (NaN)")
 
     if rsi < 30:
-        return (12, f"RSI={rsi:.1f} oversold, rebound expected +12")
+        return (12, f"RSI={rsi:.1f} 超卖，反弹预期 +12")
     if rsi < 40:
-        return (5, f"RSI={rsi:.1f} approaching oversold +5")
+        return (5, f"RSI={rsi:.1f} 接近超卖 +5")
     if rsi > 70:
-        return (-12, f"RSI={rsi:.1f} overbought, pullback risk -12")
+        return (-12, f"RSI={rsi:.1f} 超买，回调风险 -12")
     if rsi > 60:
-        return (-3, f"RSI={rsi:.1f} approaching overbought -3")
-    return (0, f"RSI={rsi:.1f} neutral")
+        return (-3, f"RSI={rsi:.1f} 接近超买 -3")
+    return (0, f"RSI={rsi:.1f} 中性")
 
 
 def score_bollinger(df: pd.DataFrame) -> tuple[int, str]:
@@ -265,7 +274,7 @@ def score_bollinger(df: pd.DataFrame) -> tuple[int, str]:
         (score, reason) tuple.
     """
     if len(df) < 1:
-        return (0, "insufficient data")
+        return (0, "数据不足")
 
     latest = df.iloc[-1]
     close = _safe(latest.get("close"))
@@ -273,23 +282,23 @@ def score_bollinger(df: pd.DataFrame) -> tuple[int, str]:
     boll_lower = _safe(latest.get("boll_lower"))
 
     if any(v is None for v in (close, boll_upper, boll_lower)):
-        return (0, "Bollinger data incomplete (NaN)")
+        return (0, "布林带数据不完整 (NaN)")
 
     band_range = boll_upper - boll_lower
     if band_range == 0:
-        return (0, "Bollinger band width is zero, cannot calculate position")
+        return (0, "布林带宽度为零，无法计算位置")
 
     position = (close - boll_lower) / band_range
 
     if position < 0.1:
-        return (12, f"position={position:.2f} near lower band (support) +12")
+        return (12, f"位置={position:.2f} 靠近下轨 (支撑) +12")
     if position < 0.3:
-        return (5, f"position={position:.2f} in lower region +5")
+        return (5, f"位置={position:.2f} 处于下轨区域 +5")
     if position > 0.9:
-        return (-10, f"position={position:.2f} near upper band (resistance) -10")
+        return (-10, f"位置={position:.2f} 靠近上轨 (压力) -10")
     if position > 0.7:
-        return (-3, f"position={position:.2f} in upper region -3")
-    return (0, f"position={position:.2f} neutral")
+        return (-3, f"位置={position:.2f} 处于上轨区域 -3")
+    return (0, f"位置={position:.2f} 中性")
 
 
 def score_kdj(df: pd.DataFrame) -> tuple[int, str]:
@@ -306,7 +315,7 @@ def score_kdj(df: pd.DataFrame) -> tuple[int, str]:
         (score, reason) tuple.
     """
     if len(df) < 2:
-        return (0, "insufficient data")
+        return (0, "数据不足")
 
     prev = df.iloc[-2]
     latest = df.iloc[-1]
@@ -319,7 +328,7 @@ def score_kdj(df: pd.DataFrame) -> tuple[int, str]:
     last_j = _safe(latest.get("j"))
 
     if any(v is None for v in (prev_k, prev_d, prev_j, last_k, last_d, last_j)):
-        return (0, "KDJ data incomplete (NaN)")
+        return (0, "KDJ数据不完整 (NaN)")
 
     parts = []
     total = 0
@@ -327,25 +336,25 @@ def score_kdj(df: pd.DataFrame) -> tuple[int, str]:
     # KDJ golden cross
     if prev_k < prev_d and last_k > last_d:
         total += 12
-        parts.append("KDJ golden cross (K crosses above D) +12")
+        parts.append("KDJ金叉 (K上穿D) +12")
 
     # KDJ death cross
     if prev_k > prev_d and last_k < last_d:
         total -= 12
-        parts.append("KDJ death cross (K crosses below D) -12")
+        parts.append("KDJ死叉 (K下穿D) -12")
 
     # J oversold
     if last_j < 20 and prev_j < 20:
         total += 10
-        parts.append(f"J={last_j:.1f} oversold for 2 days +10")
+        parts.append(f"J={last_j:.1f} 连续2日超卖 +10")
 
     # J overbought
     if last_j > 80 and prev_j > 80:
         total -= 10
-        parts.append(f"J={last_j:.1f} overbought for 2 days -10")
+        parts.append(f"J={last_j:.1f} 连续2日超买 -10")
 
     if not parts:
-        parts.append("no KDJ signal 0")
+        parts.append("无KDJ信号 0")
 
     return (_clamp(total), "; ".join(parts))
 
@@ -365,7 +374,7 @@ def score_volume(df: pd.DataFrame) -> tuple[int, str]:
         (score, reason) tuple.
     """
     if len(df) < 2:
-        return (0, "insufficient data")
+        return (0, "数据不足")
 
     prev = df.iloc[-2]
     latest = df.iloc[-1]
@@ -375,21 +384,21 @@ def score_volume(df: pd.DataFrame) -> tuple[int, str]:
     last_close = _safe(latest.get("close"))
 
     if any(v is None for v in (vol_ratio, prev_close, last_close)):
-        return (0, "Volume data incomplete (NaN)")
+        return (0, "成交量数据不完整 (NaN)")
 
     price_up = last_close > prev_close
 
     if vol_ratio > 1.5 and price_up:
-        return (12, f"vol_ratio={vol_ratio:.2f} volume spike + price up = strong buying +12")
+        return (12, f"量比={vol_ratio:.2f} 放量上涨 = 强势买入 +12")
     if vol_ratio > 1.5 and not price_up:
-        return (-10, f"vol_ratio={vol_ratio:.2f} volume spike + price down = distribution -10")
+        return (-10, f"量比={vol_ratio:.2f} 放量下跌 = 派发 -10")
     if vol_ratio < 0.5 and price_up:
-        return (-5, f"vol_ratio={vol_ratio:.2f} low volume + price up = divergence -5")
+        return (-5, f"量比={vol_ratio:.2f} 缩量上涨 = 量价背离 -5")
     if vol_ratio < 0.5 and not price_up:
-        return (5, f"vol_ratio={vol_ratio:.2f} low volume + price down = selling exhaustion +5")
+        return (5, f"量比={vol_ratio:.2f} 缩量下跌 = 卖盘衰竭 +5")
     if vol_ratio > 1.0 and price_up:
-        return (5, f"vol_ratio={vol_ratio:.2f} above-average volume + price up +5")
-    return (0, f"vol_ratio={vol_ratio:.2f} no volume signal")
+        return (5, f"量比={vol_ratio:.2f} 温和放量上涨 +5")
+    return (0, f"量比={vol_ratio:.2f} 无量能信号")
 
 
 # ---------------------------------------------------------------------------
@@ -492,10 +501,10 @@ def classify_index_trend(df: pd.DataFrame) -> str:
         return "neutral"
 
     if close > ma20 and dif > dea:
-        return "bullish"
+        return "看涨"
     if close < ma20 and dif < dea:
-        return "bearish"
-    return "neutral"
+        return "看跌"
+    return "中性"
 
 
 def calculate_market_modifier(config: dict) -> tuple[int, list[dict]]:
@@ -532,7 +541,7 @@ def calculate_market_modifier(config: dict) -> tuple[int, list[dict]]:
             results.append({"code": code, "name": name, "trend": trend})
         except Exception:
             # A failed index fetch should not crash the entire analysis
-            results.append({"code": code, "name": INDEX_NAMES.get(code, code), "trend": "neutral"})
+            results.append({"code": code, "name": INDEX_NAMES.get(code, code), "trend": "中性"})
 
     bullish_count = sum(1 for r in results if r["trend"] == "bullish")
     bearish_count = sum(1 for r in results if r["trend"] == "bearish")
@@ -578,13 +587,13 @@ def calculate_key_levels(df: pd.DataFrame) -> dict:
         support.append(("MA20", last["ma20"]))
 
     if not pd.isna(last.get("boll_lower")):
-        support.append(("Boll Lower", last["boll_lower"]))
+        support.append(("布林下轨", last["boll_lower"]))
 
     if not pd.isna(last.get("boll_upper")):
-        resistance.append(("Boll Upper", last["boll_upper"]))
+        resistance.append(("布林上轨", last["boll_upper"]))
 
     recent_high = df["high"].tail(20).max()
-    resistance.append(("20D High", recent_high))
+    resistance.append(("20日高点", recent_high))
 
     return {"support": support, "resistance": resistance}
 
@@ -607,21 +616,21 @@ def calculate_position_advice(score: int, key_levels: dict) -> str:
     """
     if score >= 75:
         pct = "60%"
-        signal = "strong buy"
+        signal = "强烈买入"
     elif score >= 60:
         pct = "40%"
-        signal = "buy signal"
+        signal = "买入信号"
     elif score >= 45:
         pct = "20%"
-        signal = "neutral"
+        signal = "中性"
     elif score >= 30:
         pct = "10%"
-        signal = "sell signal"
+        signal = "卖出信号"
     else:
         pct = "0%"
-        signal = "strong sell"
+        signal = "强烈卖出"
 
-    return f"Suggested: {pct} ({signal})"
+    return f"建议仓位: {pct} ({signal})"
 
 
 # ---------------------------------------------------------------------------
@@ -645,9 +654,9 @@ def generate_risk_alerts(df: pd.DataFrame, score: int) -> list[str]:
 
     rsi = _safe(latest.get("rsi"))
     if rsi is not None and rsi > 65:
-        alerts.append(f"RSI={rsi:.1f} approaching overbought, watch for pullback")
+        alerts.append(f"RSI={rsi:.1f} 接近超买，注意回调风险")
     elif rsi is not None and rsi < 35:
-        alerts.append(f"RSI={rsi:.1f} approaching oversold, may rebound")
+        alerts.append(f"RSI={rsi:.1f} 接近超卖，可能反弹")
 
     close = _safe(latest.get("close"))
     boll_upper = _safe(latest.get("boll_upper"))
@@ -657,21 +666,21 @@ def generate_risk_alerts(df: pd.DataFrame, score: int) -> list[str]:
         if band_range > 0:
             boll_position = (close - boll_lower) / band_range
             if boll_position > 0.85:
-                alerts.append("Close to Bollinger upper band, limited upside room")
+                alerts.append("接近布林上轨，上方空间有限")
             elif boll_position < 0.15:
-                alerts.append("Near Bollinger lower band, watch for support breakdown")
+                alerts.append("接近布林下轨，注意支撑破位")
 
     if prev is not None:
         prev_close = _safe(prev.get("close"))
         if all(v is not None for v in (close, prev_close)) and prev_close != 0:
             daily_change = (close - prev_close) / prev_close * 100
             if abs(daily_change) > 5:
-                alerts.append(f"Large daily swing ({daily_change:.1f}%), expect volatility")
+                alerts.append(f"日涨跌幅较大 ({daily_change:.1f}%)，注意波动")
 
     if score >= 70:
-        alerts.append("High bullish score - consider taking partial profits on existing positions")
+        alerts.append("多头得分较高 — 已有持仓可考虑部分获利了结")
     elif score <= 30:
-        alerts.append("Low score - avoid adding positions, wait for reversal signal")
+        alerts.append("得分偏低 — 避免加仓，等待反转信号")
 
     return alerts
 
@@ -683,9 +692,9 @@ def generate_risk_alerts(df: pd.DataFrame, score: int) -> list[str]:
 
 def _trend_icon(trend: str) -> str:
     """Return a single-character icon for a trend classification."""
-    if trend == "bullish":
+    if trend == "看涨":
         return "+"
-    if trend == "bearish":
+    if trend == "看跌":
         return "-"
     return "~"
 
@@ -701,6 +710,7 @@ def _score_icon(score: int) -> str:
 
 def format_report(
     symbol: str,
+    stock_name: str,
     df: pd.DataFrame,
     score: int,
     indicator_results: list[dict],
@@ -748,7 +758,7 @@ def format_report(
     prob = max(10, min(90, score))
 
     lines.append(separator)
-    lines.append(f"  Stock Analysis Report | {symbol} | {date_str}")
+    lines.append(f"  股票分析报告 | {stock_name} ({symbol}) | {date_str}")
     lines.append(separator)
     lines.append("")
 
@@ -757,8 +767,8 @@ def format_report(
         close_val = float(realtime_data["close"])
         open_val = float(realtime_data["open"])
         change_pct = (close_val / open_val - 1) * 100 if open_val != 0 else 0.0
-        lines.append(f"Current Price: {close_val:.2f}  Today's Change: {change_pct:+.2f}%")
-        lines.append("[Trading Session] Intraday real-time analysis")
+        lines.append(f"当前价格: {close_val:.2f}  今日涨跌: {change_pct:+.2f}%")
+        lines.append("[交易时段] 盘中实时分析")
     else:
         last_close = _safe(latest.get("close"))
         prev = df.iloc[-2] if len(df) >= 2 else None
@@ -766,22 +776,22 @@ def format_report(
             prev_close = _safe(prev.get("close"))
             if all(v is not None for v in (last_close, prev_close)) and prev_close != 0:
                 change_pct = (last_close - prev_close) / prev_close * 100
-                lines.append(f"Current Price: {last_close:.2f}  Change: {change_pct:+.2f}%")
+                lines.append(f"当前价格: {last_close:.2f}  涨跌幅: {change_pct:+.2f}%")
             else:
-                lines.append(f"Current Price: {last_close:.2f}  Change: N/A")
+                lines.append(f"当前价格: {last_close:.2f}  涨跌幅: N/A")
         else:
-            lines.append(f"Current Price: {last_close:.2f}")
+            lines.append(f"当前价格: {last_close:.2f}")
 
     lines.append("")
 
     # --- Signal + Probability ---
     if is_intraday:
-        direction = "higher" if prob >= 50 else "lower"
-        lines.append(f"[Signal Rating] {signal}")
-        lines.append(f"[Today Close Prediction] Leaning towards close {direction} ({prob}%)")
+        direction = "高收" if prob >= 50 else "低收"
+        lines.append(f"[信号评级] {signal}")
+        lines.append(f"[今日收盘预测] 倾向于收{direction} ({prob}%)")
     else:
-        lines.append(f"[Signal Rating] {signal}")
-        lines.append(f"[Next-Day Up Probability] {prob}%")
+        lines.append(f"[信号评级] {signal}")
+        lines.append(f"[次日上涨概率] {prob}%")
     lines.append("")
 
     # --- Intraday Real-Time Status ---
@@ -790,64 +800,64 @@ def format_report(
         rt_open = float(realtime_data["open"])
         rt_high = float(realtime_data["high"])
         rt_low = float(realtime_data["low"])
-        lines.append("--- Real-Time Status ---")
-        lines.append(f"Current: {rt_close:.2f} | Open: {rt_open:.2f} | High: {rt_high:.2f} | Low: {rt_low:.2f}")
+        lines.append("--- 实时行情 ---")
+        lines.append(f"现价: {rt_close:.2f} | 开盘: {rt_open:.2f} | 最高: {rt_high:.2f} | 最低: {rt_low:.2f}")
         daily_range = rt_high - rt_low
         if daily_range > 0:
             pct_in_range = (rt_close - rt_low) / daily_range
             pct_int = int(pct_in_range * 100)
             if pct_in_range < 0.33:
-                region = "lower"
+                region = "低位"
             elif pct_in_range < 0.66:
-                region = "middle"
+                region = "中位"
             else:
-                region = "upper"
-            lines.append(f"Intraday position: {region} region ({pct_int}th percentile of daily range)")
+                region = "高位"
+            lines.append(f"盘中位置: {region} (日内振幅第{pct_int}百分位)")
         else:
-            lines.append("Intraday position: flat (no range)")
+            lines.append("盘中位置: 平盘 (无振幅)")
         lines.append("")
 
     # --- Broad Market Environment ---
     if market_results:
-        lines.append("--- Broad Market Environment ---")
+        lines.append("--- 大盘环境 ---")
         for r in market_results:
             icon = _trend_icon(r["trend"])
             lines.append(f"  [{icon}] {r['name']}: {r['trend']}")
-        bullish_count = sum(1 for r in market_results if r["trend"] == "bullish")
-        bearish_count = sum(1 for r in market_results if r["trend"] == "bearish")
+        bullish_count = sum(1 for r in market_results if r["trend"] == "看涨")
+        bearish_count = sum(1 for r in market_results if r["trend"] == "看跌")
         modifier_sign = "+" if market_modifier >= 0 else ""
-        lines.append(f"Market modifier: {modifier_sign}{market_modifier} ({bullish_count} bullish, {bearish_count} bearish)")
+        lines.append(f"大盘修正: {modifier_sign}{market_modifier} ({bullish_count}看涨, {bearish_count}看跌)")
         lines.append("")
 
     # --- Technical Indicators ---
-    lines.append("--- Technical Indicators ---")
+    lines.append("--- 技术指标 ---")
     for ind in indicator_results:
         icon = _score_icon(ind["score"])
         score_sign = "+" if ind["score"] >= 0 else ""
         lines.append(f"  [{icon}] {ind['name'].upper()}: {ind['reason']} ({score_sign}{ind['score']})")
     if is_intraday:
-        lines.append("  [!] Note: Latest candle is intraday (incomplete), indicator values are approximate")
+        lines.append("  [!] 注意: 最新K线为盘中数据(未完成)，指标值为近似值")
     lines.append("")
 
     # --- Risk Alerts ---
     if risk_alerts:
-        lines.append("--- Risk Alerts ---")
+        lines.append("--- 风险警示 ---")
         for alert in risk_alerts:
             lines.append(f"  [!] {alert}")
         lines.append("")
 
     # --- Key Levels ---
-    lines.append("--- Key Levels ---")
+    lines.append("--- 关键价位 ---")
     support_parts = [f"{val:.2f} ({name})" for name, val in key_levels.get("support", [])]
     resistance_parts = [f"{val:.2f} ({name})" for name, val in key_levels.get("resistance", [])]
     if support_parts:
-        lines.append(f"Support: {' / '.join(support_parts)}")
+        lines.append(f"支撑位: {' / '.join(support_parts)}")
     if resistance_parts:
-        lines.append(f"Resistance: {' / '.join(resistance_parts)}")
+        lines.append(f"压力位: {' / '.join(resistance_parts)}")
     lines.append("")
 
     # --- Position Advice ---
-    lines.append("--- Position Advice ---")
+    lines.append("--- 仓位建议 ---")
     lines.append(position_advice)
     lines.append(separator)
 

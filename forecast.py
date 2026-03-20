@@ -2,7 +2,9 @@ import argparse
 import sys
 from datetime import datetime
 
-from data_source import get_stock_history, get_realtime_quote
+import pandas as pd
+
+from data_source import get_stock_history, get_realtime_quote, get_stock_name
 from indicators import calc_all_indicators
 from analyzer import (
     load_config,
@@ -53,11 +55,11 @@ def analyze_stock(symbol: str, config: dict, refresh: bool = False):
     try:
         df = get_stock_history(symbol, refresh=refresh)
     except RuntimeError as e:
-        print(f"  [ERROR] {e}")
+        print(f"  [错误] {e}")
         return None
 
     if df is None or len(df) < 30:
-        print(f"  [ERROR] Insufficient data for {symbol} ({len(df) if df is not None else 0} rows)")
+        print(f"  [错误] {symbol} 数据不足 ({len(df) if df is not None else 0} 行)")
         return None
 
     intraday = is_trading_hours()
@@ -77,7 +79,7 @@ def analyze_stock(symbol: str, config: dict, refresh: bool = False):
                     "close": realtime_data["close"],
                     "volume": realtime_data["volume"],
                 }
-                df = df._append(new_row, ignore_index=True)
+                df = pd.concat([df, pd.DataFrame([new_row])], ignore_index=True)
 
     df = calc_all_indicators(df)
     raw_score, ind_results = calculate_stock_score(df, config)
@@ -88,8 +90,11 @@ def analyze_stock(symbol: str, config: dict, refresh: bool = False):
     risk_alerts = generate_risk_alerts(df, final_score)
     position_advice = calculate_position_advice(final_score, key_levels)
 
+    stock_name = get_stock_name(symbol)
+
     report = format_report(
         symbol=symbol,
+        stock_name=stock_name,
         df=df,
         score=final_score,
         indicator_results=ind_results,
@@ -102,16 +107,16 @@ def analyze_stock(symbol: str, config: dict, refresh: bool = False):
         realtime_data=realtime_data,
     )
 
-    record_prediction(symbol, float(df.iloc[-1]["close"]), signal, final_score, final_score)
+    record_prediction(symbol, stock_name, float(df.iloc[-1]["close"]), signal, final_score, final_score)
 
     return report, signal, final_score
 
 
 def main():
-    parser = argparse.ArgumentParser(description="A-Share Stock Quantitative Analyzer")
-    parser.add_argument("symbols", nargs="*", help="Stock codes to analyze (e.g. 002602)")
-    parser.add_argument("--review", action="store_true", help="Show self-reflection report only")
-    parser.add_argument("--refresh", action="store_true", help="Force refresh cached data")
+    parser = argparse.ArgumentParser(description="A股量化分析工具")
+    parser.add_argument("symbols", nargs="*", help="股票代码 (如 002602)")
+    parser.add_argument("--review", action="store_true", help="仅显示预测自检报告")
+    parser.add_argument("--refresh", action="store_true", help="强制刷新缓存数据")
     args = parser.parse_args()
 
     config = load_config()
@@ -126,14 +131,14 @@ def main():
 
     symbols = args.symbols or config.get("stocks", [])
     if not symbols:
-        print("No stocks specified. Use positional args or configure stocks in config.json")
+        print("未指定股票代码，请使用参数或在 config.json 中配置 stocks")
         sys.exit(1)
 
     multiple = len(symbols) > 1
     reports = []
 
     if multiple:
-        print(f"Analyzing {len(symbols)} stocks...\n")
+        print(f"正在分析 {len(symbols)} 只股票...\n")
 
     for i, symbol in enumerate(symbols):
         if multiple:
@@ -151,20 +156,20 @@ def main():
     # Multi-stock summary
     if multiple and reports:
         reports.sort(key=lambda r: r["score"], reverse=True)
-        buy_stocks = [r for r in reports if r["signal"] in ("Strong Buy", "Buy")]
-        sell_stocks = [r for r in reports if r["signal"] in ("Strong Sell", "Sell")]
-        neutral_stocks = [r for r in reports if r["signal"] == "Hold"]
+        buy_stocks = [r for r in reports if r["signal"] in ("强烈买入", "买入")]
+        sell_stocks = [r for r in reports if r["signal"] in ("强烈卖出", "卖出")]
+        neutral_stocks = [r for r in reports if r["signal"] == "观望"]
 
-        print("--- Daily Summary ---")
+        print("--- 每日汇总 ---")
         if buy_stocks:
             items = ", ".join(f"{r['symbol']} ({r['signal']}, {r['score']}%)" for r in buy_stocks)
-            print(f"Watch: {items}")
+            print(f"关注: {items}")
         if sell_stocks:
             items = ", ".join(f"{r['symbol']} ({r['signal']}, {r['score']}%)" for r in sell_stocks)
-            print(f"Avoid: {items}")
+            print(f"回避: {items}")
         if neutral_stocks:
             items = ", ".join(f"{r['symbol']} ({r['score']}%)" for r in neutral_stocks)
-            print(f"Neutral: {items}")
+            print(f"中性: {items}")
 
     # Show accuracy stats after all analyses
     stats = calculate_accuracy()
