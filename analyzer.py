@@ -829,8 +829,8 @@ def format_report(
     # --- Price info ---
     if is_intraday and realtime_data is not None:
         close_val = float(realtime_data["close"])
-        open_val = float(realtime_data["open"])
-        change_pct = (close_val / open_val - 1) * 100 if open_val != 0 else 0.0
+        prev_close_val = float(realtime_data.get("prev_close", 0))
+        change_pct = (close_val / prev_close_val - 1) * 100 if prev_close_val != 0 else 0.0
         pct_color = _BULLISH if change_pct >= 0 else _BEARISH
         lines.append(f"当前价格: {_BOLD}{close_val:.2f}{_RST}  今日涨跌: {pct_color}{change_pct:+.2f}%{_RST}")
         label = session_label or "盘中实时分析"

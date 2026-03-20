@@ -339,6 +339,7 @@ def get_realtime_quote(symbol: str) -> dict | None:
                 "high": float(fields[4]),
                 "low": float(fields[5]),
                 "close": float(fields[6]),
+                "prev_close": float(fields[3]),
                 "volume": float(fields[11]),
                 "name": fields[1],
             }
@@ -366,6 +367,7 @@ def get_realtime_quote(symbol: str) -> dict | None:
             "high": float(fields[4]),
             "low": float(fields[5]),
             "close": float(fields[3]),
+            "prev_close": float(fields[2]),
             "volume": float(fields[8]),
             "name": fields[0],
         }
