@@ -1,5 +1,5 @@
 {
-  "stock_list": "002602 hk2400 002468 513330",
+  "stock_list": "002602 hk2400 002468 513330 512690 159570 512720 515220 159625 159361 159755",
   "indicators": {
     "ma": { "enabled": true, "weight": 25 },
     "macd": { "enabled": true, "weight": 20 },
@@ -10,7 +10,7 @@
   },
   "market_modifier": {
     "enabled": true,
-    "max_impact": 8,
+    "max_impact": 15,
     "indices": ["sh000001", "sz399001", "sz399006", "sh000905"]
   }
 }

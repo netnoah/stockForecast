@@ -87,6 +87,17 @@ INDEX_NAMES = {
     "sh000905": "中证500",
 }
 
+# Trend strength levels for market modifier
+_TRENT_BULLISH = "bullish"
+_TRENT_BEARISH = "bearish"
+_TRENT_NEUTRAL = "neutral"
+
+_TRENT_LABELS = {
+    _TRENT_BULLISH: "看涨",
+    _TRENT_BEARISH: "看跌",
+    _TRENT_NEUTRAL: "中性",
+}
+
 
 # ---------------------------------------------------------------------------
 # Config
@@ -538,17 +549,20 @@ def calculate_stock_score(df: pd.DataFrame, config: dict) -> tuple[int, list[dic
 # ---------------------------------------------------------------------------
 
 
-def classify_index_trend(df: pd.DataFrame) -> str:
-    """Classify the trend of a market index based on MA20 and MACD.
+def classify_index_trend(df: pd.DataFrame) -> tuple[str, float]:
+    """Classify the trend of a market index with strength score.
 
-    Args:
-        df: DataFrame with at least close, ma20, dif, dea columns.
+    Combines three signals:
+    - Price vs MA20 position (bias %)
+    - MACD direction (DIF vs DEA)
+    - MA20 slope (5-day change rate)
 
     Returns:
-        "bullish", "bearish", or "neutral".
+        (trend, strength) where trend is one of _TRENT_* constants
+        and strength is a float in [-1, +1].
     """
-    if len(df) < 1:
-        return "neutral"
+    if len(df) < 6:
+        return (_TRENT_NEUTRAL, 0.0)
 
     latest = df.iloc[-1]
     close = _safe(latest.get("close"))
@@ -556,25 +570,43 @@ def classify_index_trend(df: pd.DataFrame) -> str:
     dif = _safe(latest.get("dif"))
     dea = _safe(latest.get("dea"))
 
-    if any(v is None for v in (ma20, dif, dea)):
-        return "neutral"
+    if any(v is None for v in (close, ma20, dif, dea)):
+        return (_TRENT_NEUTRAL, 0.0)
 
-    if close is None:
-        return "neutral"
+    # 1) Price bias from MA20
+    bias = (close - ma20) / ma20
+    bias_score = max(-1.0, min(1.0, bias * 20))  # ±5% bias → ±1
 
-    if close > ma20 and dif > dea:
-        return "看涨"
-    if close < ma20 and dif < dea:
-        return "看跌"
-    return "中性"
+    # 2) MACD direction
+    macd_score = 0.0
+    macd_gap = (dif - dea) / close * 1000  # normalized
+    macd_score = max(-1.0, min(1.0, macd_gap * 2))
+
+    # 3) MA20 slope (5-day change rate)
+    slope_score = 0.0
+    if len(df) >= 25:
+        ma20_5ago = _safe(df.iloc[-6].get("ma20"))
+        if ma20_5ago is not None and ma20_5ago != 0:
+            slope = (ma20 - ma20_5ago) / ma20_5ago
+            slope_score = max(-1.0, min(1.0, slope * 50))
+
+    # Composite strength
+    strength = (bias_score * 0.4 + macd_score * 0.35 + slope_score * 0.25)
+    strength = max(-1.0, min(1.0, strength))
+
+    if strength > 0.15:
+        return (_TRENT_BULLISH, strength)
+    elif strength < -0.15:
+        return (_TRENT_BEARISH, strength)
+    return (_TRENT_NEUTRAL, strength)
 
 
 def calculate_market_modifier(config: dict) -> tuple[int, list[dict]]:
     """Calculate a market-wide modifier based on broad index trends.
 
-    Reads market_modifier config (enabled, max_impact, indices list).
-    For each index, fetches history, calculates MA + MACD, classifies trend.
-    Returns a modifier value and list of per-index results.
+    Each index is classified with a strength score in [-1, +1].
+    The modifier is the weighted average of all index strengths, scaled
+    to [-max_impact, +max_impact].
 
     Args:
         config: Parsed config.json dictionary.
@@ -582,7 +614,7 @@ def calculate_market_modifier(config: dict) -> tuple[int, list[dict]]:
     Returns:
         (modifier, results) where:
         - modifier: Integer adjustment in [-max_impact, +max_impact].
-        - results: List of dicts with keys: code, name, trend.
+        - results: List of dicts with keys: code, name, trend, strength.
     """
     modifier_config = config.get("market_modifier", {})
     enabled = modifier_config.get("enabled", False)
@@ -598,30 +630,18 @@ def calculate_market_modifier(config: dict) -> tuple[int, list[dict]]:
             index_df = get_index_history(code)
             index_df = calc_ma(index_df)
             index_df = calc_macd(index_df)
-            trend = classify_index_trend(index_df)
+            trend, strength = classify_index_trend(index_df)
             name = INDEX_NAMES.get(code, code)
-            results.append({"code": code, "name": name, "trend": trend})
+            results.append({"code": code, "name": name, "trend": trend, "strength": strength})
         except Exception:
-            # A failed index fetch should not crash the entire analysis
-            results.append({"code": code, "name": INDEX_NAMES.get(code, code), "trend": "中性"})
+            results.append({"code": code, "name": INDEX_NAMES.get(code, code), "trend": _TRENT_NEUTRAL, "strength": 0.0})
 
-    bullish_count = sum(1 for r in results if r["trend"] == "看涨")
-    bearish_count = sum(1 for r in results if r["trend"] == "看跌")
-    total_count = len(results)
+    # Weighted average of strengths
+    total_strength = sum(r["strength"] for r in results)
+    avg_strength = total_strength / len(results) if results else 0.0
 
-    modifier = 0
-    if bullish_count >= 3:
-        ratio = bullish_count / total_count
-        modifier = int(max_impact * (0.67 + 0.33 * ratio))
-        modifier = min(modifier, max_impact)
-    elif bullish_count == 2:
-        modifier = int(max_impact * 0.35)
-    elif bearish_count >= 3:
-        ratio = bearish_count / total_count
-        modifier = int(-max_impact * (0.67 + 0.33 * ratio))
-        modifier = max(modifier, -max_impact)
-    elif bearish_count == 2:
-        modifier = int(-max_impact * 0.4)
+    modifier = int(avg_strength * max_impact)
+    modifier = max(-max_impact, min(max_impact, modifier))
 
     return (modifier, results)
 
@@ -754,9 +774,9 @@ def generate_risk_alerts(df: pd.DataFrame, score: int) -> list[str]:
 
 def _trend_icon(trend: str) -> str:
     """Return a single-character icon for a trend classification."""
-    if trend == "看涨":
+    if trend == _TRENT_BULLISH:
         return "+"
-    if trend == "看跌":
+    if trend == _TRENT_BEARISH:
         return "-"
     return "~"
 
@@ -819,7 +839,6 @@ def format_report(
             date_str = str(raw_date)[:10] if raw_date else ""
 
     signal = score_to_signal(score)
-    prob = int((score + 100) / 2)  # Map [-100,+100] to [0,100]
 
     lines.append(_CYAN + separator + _RST)
     lines.append(f"  {_BOLD}{stock_name} ({symbol}){_RST} | {date_str}")
@@ -851,16 +870,15 @@ def format_report(
 
     lines.append("")
 
-    # --- Signal + Probability ---
+    # --- Signal + Score ---
     colored_signal = _signal_color(signal)
-    colored_prob = _score_color(prob)
+    colored_score = _score_color(score)
     if is_intraday:
-        direction = "高收" if prob >= 50 else "低收"
         lines.append(f"[信号评级] {colored_signal}")
-        lines.append(f"[今日收盘预测] 倾向于收{direction} ({colored_prob}%)")
+        lines.append(f"[综合评分] {colored_score}分")
     else:
         lines.append(f"[信号评级] {colored_signal}")
-        lines.append(f"[次日上涨概率] {colored_prob}%")
+        lines.append(f"[综合评分] {colored_score}分")
     lines.append("")
 
     # --- Intraday Real-Time Status ---
@@ -891,10 +909,12 @@ def format_report(
         lines.append(_BOLD + "--- 大盘环境 ---" + _RST)
         for r in market_results:
             icon = _trend_icon(r["trend"])
-            trend_color = _BULLISH if r["trend"] == "看涨" else (_BEARISH if r["trend"] == "看跌" else _WHITE)
-            lines.append(f"  [{icon}] {r['name']}: {trend_color}{r['trend']}{_RST}")
-        bullish_count = sum(1 for r in market_results if r["trend"] == "看涨")
-        bearish_count = sum(1 for r in market_results if r["trend"] == "看跌")
+            trend_label = _TRENT_LABELS.get(r["trend"], r["trend"])
+            trend_color = _BULLISH if r["trend"] == _TRENT_BULLISH else (_BEARISH if r["trend"] == _TRENT_BEARISH else _WHITE)
+            strength_str = f"({r['strength']:+.2f})" if "strength" in r else ""
+            lines.append(f"  [{icon}] {r['name']}: {trend_color}{trend_label}{strength_str}{_RST}")
+        bullish_count = sum(1 for r in market_results if r["trend"] == _TRENT_BULLISH)
+        bearish_count = sum(1 for r in market_results if r["trend"] == _TRENT_BEARISH)
         modifier_sign = "+" if market_modifier >= 0 else ""
         lines.append(f"大盘修正: {modifier_sign}{market_modifier} ({bullish_count}看涨, {bearish_count}看跌)")
         lines.append("")
@@ -932,5 +952,8 @@ def format_report(
     lines.append(_BOLD + "--- 仓位建议 ---" + _RST)
     lines.append(position_advice)
     lines.append(_CYAN + separator + _RST)
+
+    # --- Score Reference ---
+    lines.append(_DIM + "评分参考: 强烈买入[50,100] 买入[15,49] 观望[-14,14] 卖出[-49,-15] 强烈卖出[-100,-50]" + _RST)
 
     return "\n".join(lines)

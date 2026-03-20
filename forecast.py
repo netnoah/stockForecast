@@ -169,16 +169,17 @@ def main():
 
     for i, symbol in enumerate(symbols):
         if multiple:
-            print(f"{'=' * 50}")
+            print(f"\n{'=' * 50}")
             print(f"  {i + 1}/{len(symbols)} | {symbol}")
-            print(f"{'=' * 50}")
+            print(f"{'=' * 50}\n")
 
         result = analyze_stock(symbol, config, args.refresh)
         if result is None:
             continue
         report, signal, score = result
         print(report)
-        reports.append({"symbol": symbol, "signal": signal, "score": score})
+        stock_name = get_stock_name(symbol)
+        reports.append({"symbol": symbol, "name": stock_name, "signal": signal, "score": score})
 
     # Multi-stock summary
     if multiple and reports:
@@ -189,13 +190,13 @@ def main():
 
         print("--- 每日汇总 ---")
         if buy_stocks:
-            items = ", ".join(f"{r['symbol']} ({r['signal']}, {r['score']}%)" for r in buy_stocks)
+            items = ", ".join(f"{r['name']}({r['symbol']}) {r['signal']} {r['score']}分" for r in buy_stocks)
             print(f"关注: {items}")
         if sell_stocks:
-            items = ", ".join(f"{r['symbol']} ({r['signal']}, {r['score']}%)" for r in sell_stocks)
+            items = ", ".join(f"{r['name']}({r['symbol']}) {r['signal']} {r['score']}分" for r in sell_stocks)
             print(f"回避: {items}")
         if neutral_stocks:
-            items = ", ".join(f"{r['symbol']} ({r['score']}%)" for r in neutral_stocks)
+            items = ", ".join(f"{r['name']}({r['symbol']}) {r['score']}分" for r in neutral_stocks)
             print(f"中性: {items}")
 
     # Show accuracy stats after all analyses
