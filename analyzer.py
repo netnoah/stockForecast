@@ -783,6 +783,7 @@ def format_report(
     position_advice: str,
     is_intraday: bool = False,
     realtime_data: dict | None = None,
+    session_label: str = "",
 ) -> str:
     """Format all analysis data into a human-readable text report.
 
@@ -798,6 +799,7 @@ def format_report(
         position_advice: Position advice string from calculate_position_advice.
         is_intraday: Whether this is an intraday analysis.
         realtime_data: Optional dict with real-time quote data.
+        session_label: Label describing current market session.
 
     Returns:
         Formatted multi-line report string.
@@ -831,7 +833,8 @@ def format_report(
         change_pct = (close_val / open_val - 1) * 100 if open_val != 0 else 0.0
         pct_color = _BULLISH if change_pct >= 0 else _BEARISH
         lines.append(f"当前价格: {_BOLD}{close_val:.2f}{_RST}  今日涨跌: {pct_color}{change_pct:+.2f}%{_RST}")
-        lines.append(_DIM + "[交易时段] 盘中实时分析" + _RST)
+        label = session_label or "盘中实时分析"
+        lines.append(_DIM + f"[交易时段] {label}" + _RST)
     else:
         last_close = _safe(latest.get("close"))
         prev = df.iloc[-2] if len(df) >= 2 else None

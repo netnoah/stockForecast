@@ -26,12 +26,29 @@ from tracker import (
 
 
 def is_trading_hours() -> bool:
-    """Check if current time is within A-share trading hours."""
+    """Check if current time is within or after an A-share trading session on a trading day.
+
+    Returns True from 9:30 (morning open) through 15:00 (afternoon close) on weekdays,
+    so that post-morning-session analysis (11:30-13:00) still fetches realtime data.
+    """
     now = datetime.now()
     if now.weekday() >= 5:
         return False
     hour_min = now.hour + now.minute / 60
-    return (9.5 <= hour_min <= 11.5) or (13.0 <= hour_min <= 15.0)
+    return 9.5 <= hour_min <= 15.0
+
+
+def _session_label() -> str:
+    """Return a label describing the current market session."""
+    now = datetime.now()
+    hour_min = now.hour + now.minute / 60
+    if 9.5 <= hour_min <= 11.5:
+        return "盘中实时分析"
+    if 11.5 < hour_min < 13.0:
+        return "午间休市 (上午收盘数据)"
+    if 13.0 <= hour_min <= 15.0:
+        return "盘中实时分析"
+    return "盘后分析"
 
 
 def fetch_actual_close(symbol: str, pred_date: str) -> float | None:
@@ -65,9 +82,11 @@ def analyze_stock(symbol: str, config: dict, refresh: bool = False):
 
     intraday = is_trading_hours()
     realtime_data = None
+    session_label = ""
 
     if intraday:
         realtime_data = get_realtime_quote(symbol)
+        session_label = _session_label()
         if realtime_data:
             today_str = datetime.now().strftime("%Y-%m-%d")
             last_date = str(df.iloc[-1]["date"])[:10]
@@ -106,6 +125,7 @@ def analyze_stock(symbol: str, config: dict, refresh: bool = False):
         position_advice=position_advice,
         is_intraday=intraday,
         realtime_data=realtime_data,
+        session_label=session_label,
     )
 
     record_prediction(symbol, stock_name, float(df.iloc[-1]["close"]), signal, final_score, final_score)
