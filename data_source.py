@@ -43,12 +43,29 @@ _CSV_COLUMNS = ["date", "open", "high", "low", "close", "volume"]
 # ---------------------------------------------------------------------------
 
 
-def _exchange_prefix(code: str) -> str:
-    """Return the exchange prefix for a numeric stock/index code.
+def _is_hk_stock(symbol: str) -> bool:
+    """Return True if the symbol is a Hong Kong stock (e.g. 'hk2400')."""
+    return symbol.lower().startswith("hk")
 
+
+def _hk_code(symbol: str) -> str:
+    """Extract the numeric HK stock code, zero-padded to 5 digits.
+
+    'hk2400' -> '02400', 'hk00700' -> '00700'
+    """
+    digits = symbol[2:] if symbol.lower().startswith("hk") else symbol
+    return digits.zfill(5)
+
+
+def _exchange_prefix(code: str) -> str:
+    """Return the exchange prefix for a stock/index code.
+
+    'hk' prefix -> 'hk' (Hong Kong).
     Codes starting with 6, 9, 5 belong to Shanghai (sh).
     All others belong to Shenzhen (sz).
     """
+    if _is_hk_stock(code):
+        return "hk"
     first_char = code[0] if code else ""
     if first_char in ("6", "9", "5"):
         return "sh"
@@ -129,11 +146,36 @@ def _fetch_via_sina(full_code: str) -> pd.DataFrame | None:
         return None
 
 
+def _fetch_via_akshare_hk(symbol: str) -> pd.DataFrame | None:
+    """Fetch HK stock daily OHLCV data via akshare (Sina source). Returns None on failure."""
+    try:
+        import akshare as ak
+    except ImportError:
+        return None
+
+    try:
+        code = _hk_code(symbol)
+        df = ak.stock_hk_daily(symbol=code, adjust="qfq")
+        if df is None or df.empty:
+            return None
+        df = df[_CSV_COLUMNS].copy()
+        df["date"] = pd.to_datetime(df["date"]).dt.strftime("%Y-%m-%d")
+        return df
+    except Exception:
+        return None
+
+
 def _fetch_history(full_code: str) -> pd.DataFrame:
     """Fetch historical data trying akshare first, then Sina as fallback.
 
     Raises RuntimeError if both sources fail.
     """
+    if _is_hk_stock(full_code):
+        df = _fetch_via_akshare_hk(full_code)
+        if df is not None and not df.empty:
+            return df
+        raise RuntimeError(f"Failed to fetch HK stock data for {full_code}")
+
     df = _fetch_via_akshare(full_code)
     if df is not None and not df.empty:
         return df
@@ -147,6 +189,20 @@ def _fetch_history(full_code: str) -> pd.DataFrame:
 
 def _fetch_incremental(full_code: str, after_date: str) -> pd.DataFrame:
     """Fetch data after a given date. Falls back to full fetch on failure."""
+    if _is_hk_stock(full_code):
+        # HK stocks: full fetch via akshare then filter (no incremental Sina K-line API)
+        try:
+            df = _fetch_via_akshare_hk(full_code)
+            if df is not None and not df.empty:
+                df["date"] = pd.to_datetime(df["date"])
+                after_dt = pd.to_datetime(after_date)
+                df = df[df["date"] > after_dt].copy()
+                df["date"] = df["date"].dt.strftime("%Y-%m-%d")
+                return df
+        except Exception:
+            pass
+        return _fetch_history(full_code)
+
     try:
         df = _fetch_via_sina(full_code)
         if df is not None and not df.empty:
@@ -183,6 +239,12 @@ def _stock_cache_path(symbol: str) -> str:
     Falls back to old naming (code-only) if the name cannot be retrieved,
     and migrates old files to the new naming convention.
     """
+    if _is_hk_stock(symbol):
+        code = _hk_code(symbol)
+        name = get_stock_name(symbol)
+        cache_file = f"hk{code}_{name}.csv"
+        return _cache_path(cache_file)
+
     prefix = _exchange_prefix(symbol)
     full_code = f"{prefix}{symbol}"
     name = get_stock_name(symbol)
@@ -213,8 +275,11 @@ def get_stock_history(symbol: str, refresh: bool = False) -> pd.DataFrame:
     Returns:
         DataFrame with columns: date, open, high, low, close, volume.
     """
-    prefix = _exchange_prefix(symbol)
-    full_code = f"{prefix}{symbol}"
+    if _is_hk_stock(symbol):
+        full_code = symbol  # e.g. 'hk2400' — already includes prefix
+    else:
+        prefix = _exchange_prefix(symbol)
+        full_code = f"{prefix}{symbol}"
     cache_filepath = _stock_cache_path(symbol)
 
     if not refresh:
@@ -246,13 +311,40 @@ def get_stock_history(symbol: str, refresh: bool = False) -> pd.DataFrame:
 def get_realtime_quote(symbol: str) -> dict | None:
     """Get real-time quote for a stock during trading hours.
 
+    Supports both A-share and HK stock symbols.
+
     Args:
-        symbol: Numeric stock code (e.g. '002602').
+        symbol: Stock code (e.g. '002602' for A-share, 'hk2400' for HK).
 
     Returns:
         Dict with keys: date, open, high, low, close, volume, name.
         Returns None if the quote cannot be retrieved.
     """
+    if _is_hk_stock(symbol):
+        code = _hk_code(symbol)
+        url = f"http://hq.sinajs.cn/list=rt_hk{code}"
+        try:
+            resp = requests.get(url, headers=_SINA_HEADERS, timeout=10)
+            resp.raise_for_status()
+            content = resp.text
+            parts = content.split('"')
+            if len(parts) < 2:
+                return None
+            fields = parts[1].split(",")
+            if len(fields) < 19:
+                return None
+            return {
+                "date": fields[17],
+                "open": float(fields[2]),
+                "high": float(fields[4]),
+                "low": float(fields[5]),
+                "close": float(fields[6]),
+                "volume": float(fields[11]),
+                "name": fields[1],
+            }
+        except Exception:
+            return None
+
     prefix = _exchange_prefix(symbol)
     full_code = f"{prefix}{symbol}"
     url = _SINA_REALTIME_URL.format(full_code=full_code)
@@ -285,11 +377,27 @@ def get_stock_name(symbol: str) -> str:
     """Get the Chinese name of a stock via Sina Finance API.
 
     Args:
-        symbol: Numeric stock code (e.g. '002602').
+        symbol: Stock code (e.g. '002602' for A-share, 'hk2400' for HK).
 
     Returns:
         Stock name string, or the symbol code itself on failure.
     """
+    if _is_hk_stock(symbol):
+        code = _hk_code(symbol)
+        url = f"http://hq.sinajs.cn/list=rt_hk{code}"
+        try:
+            resp = requests.get(url, headers=_SINA_HEADERS, timeout=10)
+            resp.raise_for_status()
+            content = resp.text
+            parts = content.split('"')
+            if len(parts) < 2:
+                return symbol
+            fields = parts[1].split(",")
+            name = fields[1] if len(fields) > 1 else ""
+            return name if name else symbol
+        except Exception:
+            return symbol
+
     prefix = _exchange_prefix(symbol)
     full_code = f"{prefix}{symbol}"
     url = _SINA_REALTIME_URL.format(full_code=full_code)
