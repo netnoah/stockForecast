@@ -23,6 +23,7 @@ from tracker import (
     calculate_accuracy,
     format_accuracy_report,
 )
+from wecom import push_reports
 
 
 def is_trading_hours() -> bool:
@@ -188,31 +189,43 @@ def main():
         report, signal, score = result
         print(report)
         stock_name = get_stock_name(symbol)
-        reports.append({"symbol": symbol, "name": stock_name, "signal": signal, "score": score})
+        reports.append({"symbol": symbol, "name": stock_name, "signal": signal, "score": score, "report": report})
 
     # Multi-stock summary
+    push_sections: list[str] = []
     if multiple and reports:
         reports.sort(key=lambda r: r["score"], reverse=True)
         buy_stocks = [r for r in reports if r["signal"] in ("强烈买入", "买入")]
         sell_stocks = [r for r in reports if r["signal"] in ("强烈卖出", "卖出")]
         neutral_stocks = [r for r in reports if r["signal"] == "观望"]
 
-        print("--- 每日汇总 ---")
+        summary_lines = ["--- 每日汇总 ---"]
         if buy_stocks:
             items = ", ".join(f"{r['name']}({r['symbol']}) {r['signal']} {r['score']}分" for r in buy_stocks)
-            print(f"关注: {items}")
+            summary_lines.append(f"关注: {items}")
         if sell_stocks:
             items = ", ".join(f"{r['name']}({r['symbol']}) {r['signal']} {r['score']}分" for r in sell_stocks)
-            print(f"回避: {items}")
+            summary_lines.append(f"回避: {items}")
         if neutral_stocks:
             items = ", ".join(f"{r['name']}({r['symbol']}) {r['score']}分" for r in neutral_stocks)
-            print(f"中性: {items}")
+            summary_lines.append(f"中性: {items}")
+
+        summary_text = "\n".join(summary_lines)
+        print(summary_text)
+        push_sections.append(summary_text)
 
     # Show accuracy stats after all analyses
     stats = calculate_accuracy()
     if stats["verified"] > 0:
+        accuracy_report = format_accuracy_report(stats)
         print("")
-        print(format_accuracy_report(stats))
+        print(accuracy_report)
+        push_sections.append(accuracy_report)
+
+    # Push to WeChat Work — ask once, send all collected sections
+    if push_sections or reports:
+        all_sections = [r["report"] for r in reports] + push_sections
+        push_reports(config, all_sections, title="分析报告")
 
 
 if __name__ == "__main__":

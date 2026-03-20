@@ -1,5 +1,7 @@
 {
   "stock_list": "002602 hk2400 002468 513330 512690 159570 512720 515220 159625 159361 159755",
+  "wecom_webhook": "",
+  "wecom_msg_format": "text",
   "indicators": {
     "ma": { "enabled": true, "weight": 25 },
     "macd": { "enabled": true, "weight": 20 },
