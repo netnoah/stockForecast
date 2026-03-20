@@ -85,7 +85,7 @@ def score_to_signal(score: int) -> str:
     for low, high, label in SIGNAL_RATINGS:
         if low <= score <= high:
             return label
-    return "Hold"
+    return "观望"
 
 
 # ---------------------------------------------------------------------------
@@ -466,7 +466,7 @@ def calculate_stock_score(df: pd.DataFrame, config: dict) -> tuple[int, list[dic
         raw_score = 50.0
 
     # Clamp to valid signal range
-    raw_score = max(10, min(90, raw_score))
+    raw_score = max(0, min(100, raw_score))
 
     return (int(raw_score), results)
 
@@ -543,8 +543,8 @@ def calculate_market_modifier(config: dict) -> tuple[int, list[dict]]:
             # A failed index fetch should not crash the entire analysis
             results.append({"code": code, "name": INDEX_NAMES.get(code, code), "trend": "中性"})
 
-    bullish_count = sum(1 for r in results if r["trend"] == "bullish")
-    bearish_count = sum(1 for r in results if r["trend"] == "bearish")
+    bullish_count = sum(1 for r in results if r["trend"] == "看涨")
+    bearish_count = sum(1 for r in results if r["trend"] == "看跌")
     total_count = len(results)
 
     modifier = 0
@@ -755,7 +755,7 @@ def format_report(
             date_str = str(raw_date)[:10] if raw_date else ""
 
     signal = score_to_signal(score)
-    prob = max(10, min(90, score))
+    prob = max(0, min(100, score))
 
     lines.append(separator)
     lines.append(f"  股票分析报告 | {stock_name} ({symbol}) | {date_str}")
