@@ -20,6 +20,43 @@ from indicators import calc_ma, calc_macd
 
 
 # ---------------------------------------------------------------------------
+# ANSI colors
+# ---------------------------------------------------------------------------
+
+_RST = "\033[0m"
+_BOLD = "\033[1m"
+_DIM = "\033[2m"
+_RED = "\033[32m"
+_GREEN = "\033[31m"
+_YELLOW = "\033[33m"
+_BLUE = "\033[34m"
+_CYAN = "\033[36m"
+_WHITE = "\033[37m"
+
+
+def _signal_color(signal: str) -> str:
+    """Return ANSI color for a signal label."""
+    if signal in ("强烈买入",):
+        return _RED + _BOLD + signal + _RST
+    if signal in ("买入",):
+        return _GREEN + _BOLD + signal + _RST
+    if signal in ("卖出",):
+        return _YELLOW + signal + _RST
+    if signal in ("强烈卖出",):
+        return _RED + signal + _RST
+    return _WHITE + signal + _RST
+
+
+def _score_color(score: int) -> str:
+    """Return ANSI color for a numeric score."""
+    if score >= 60:
+        return _GREEN + _BOLD + str(score) + _RST
+    if score <= 40:
+        return _RED + str(score) + _RST
+    return _YELLOW + str(score) + _RST
+
+
+# ---------------------------------------------------------------------------
 # Constants
 # ---------------------------------------------------------------------------
 
@@ -757,9 +794,9 @@ def format_report(
     signal = score_to_signal(score)
     prob = max(0, min(100, score))
 
-    lines.append(separator)
-    lines.append(f"  股票分析报告 | {stock_name} ({symbol}) | {date_str}")
-    lines.append(separator)
+    lines.append(_CYAN + separator + _RST)
+    lines.append(f"  {_BOLD}{stock_name} ({symbol}){_RST} | {date_str}")
+    lines.append(_CYAN + separator + _RST)
     lines.append("")
 
     # --- Price info ---
@@ -767,8 +804,9 @@ def format_report(
         close_val = float(realtime_data["close"])
         open_val = float(realtime_data["open"])
         change_pct = (close_val / open_val - 1) * 100 if open_val != 0 else 0.0
-        lines.append(f"当前价格: {close_val:.2f}  今日涨跌: {change_pct:+.2f}%")
-        lines.append("[交易时段] 盘中实时分析")
+        pct_color = _GREEN if change_pct >= 0 else _RED
+        lines.append(f"当前价格: {_BOLD}{close_val:.2f}{_RST}  今日涨跌: {pct_color}{change_pct:+.2f}%{_RST}")
+        lines.append(_DIM + "[交易时段] 盘中实时分析" + _RST)
     else:
         last_close = _safe(latest.get("close"))
         prev = df.iloc[-2] if len(df) >= 2 else None
@@ -776,22 +814,25 @@ def format_report(
             prev_close = _safe(prev.get("close"))
             if all(v is not None for v in (last_close, prev_close)) and prev_close != 0:
                 change_pct = (last_close - prev_close) / prev_close * 100
-                lines.append(f"当前价格: {last_close:.2f}  涨跌幅: {change_pct:+.2f}%")
+                pct_color = _GREEN if change_pct >= 0 else _RED
+                lines.append(f"当前价格: {_BOLD}{last_close:.2f}{_RST}  涨跌幅: {pct_color}{change_pct:+.2f}%{_RST}")
             else:
-                lines.append(f"当前价格: {last_close:.2f}  涨跌幅: N/A")
+                lines.append(f"当前价格: {_BOLD}{last_close:.2f}{_RST}  涨跌幅: N/A")
         else:
-            lines.append(f"当前价格: {last_close:.2f}")
+            lines.append(f"当前价格: {_BOLD}{last_close:.2f}{_RST}")
 
     lines.append("")
 
     # --- Signal + Probability ---
+    colored_signal = _signal_color(signal)
+    colored_prob = _score_color(prob)
     if is_intraday:
         direction = "高收" if prob >= 50 else "低收"
-        lines.append(f"[信号评级] {signal}")
-        lines.append(f"[今日收盘预测] 倾向于收{direction} ({prob}%)")
+        lines.append(f"[信号评级] {colored_signal}")
+        lines.append(f"[今日收盘预测] 倾向于收{direction} ({colored_prob}%)")
     else:
-        lines.append(f"[信号评级] {signal}")
-        lines.append(f"[次日上涨概率] {prob}%")
+        lines.append(f"[信号评级] {colored_signal}")
+        lines.append(f"[次日上涨概率] {colored_prob}%")
     lines.append("")
 
     # --- Intraday Real-Time Status ---
@@ -800,8 +841,8 @@ def format_report(
         rt_open = float(realtime_data["open"])
         rt_high = float(realtime_data["high"])
         rt_low = float(realtime_data["low"])
-        lines.append("--- 实时行情 ---")
-        lines.append(f"现价: {rt_close:.2f} | 开盘: {rt_open:.2f} | 最高: {rt_high:.2f} | 最低: {rt_low:.2f}")
+        lines.append(_BOLD + "--- 实时行情 ---" + _RST)
+        lines.append(f"现价: {_BOLD}{rt_close:.2f}{_RST} | 开盘: {rt_open:.2f} | 最高: {_GREEN}{rt_high:.2f}{_RST} | 最低: {_RED}{rt_low:.2f}{_RST}")
         daily_range = rt_high - rt_low
         if daily_range > 0:
             pct_in_range = (rt_close - rt_low) / daily_range
@@ -819,10 +860,11 @@ def format_report(
 
     # --- Broad Market Environment ---
     if market_results:
-        lines.append("--- 大盘环境 ---")
+        lines.append(_BOLD + "--- 大盘环境 ---" + _RST)
         for r in market_results:
             icon = _trend_icon(r["trend"])
-            lines.append(f"  [{icon}] {r['name']}: {r['trend']}")
+            trend_color = _GREEN if r["trend"] == "看涨" else (_RED if r["trend"] == "看跌" else _WHITE)
+            lines.append(f"  [{icon}] {r['name']}: {trend_color}{r['trend']}{_RST}")
         bullish_count = sum(1 for r in market_results if r["trend"] == "看涨")
         bearish_count = sum(1 for r in market_results if r["trend"] == "看跌")
         modifier_sign = "+" if market_modifier >= 0 else ""
@@ -830,24 +872,25 @@ def format_report(
         lines.append("")
 
     # --- Technical Indicators ---
-    lines.append("--- 技术指标 ---")
+    lines.append(_BOLD + "--- 技术指标 ---" + _RST)
     for ind in indicator_results:
         icon = _score_icon(ind["score"])
         score_sign = "+" if ind["score"] >= 0 else ""
-        lines.append(f"  [{icon}] {ind['name'].upper()}: {ind['reason']} ({score_sign}{ind['score']})")
+        sc = _GREEN if ind["score"] > 0 else (_RED if ind["score"] < 0 else _DIM)
+        lines.append(f"  [{icon}] {ind['name'].upper()}: {ind['reason']} ({score_sign}{sc}{ind['score']}{_RST})")
     if is_intraday:
-        lines.append("  [!] 注意: 最新K线为盘中数据(未完成)，指标值为近似值")
+        lines.append(_DIM + "  [!] 注意: 最新K线为盘中数据(未完成)，指标值为近似值" + _RST)
     lines.append("")
 
     # --- Risk Alerts ---
     if risk_alerts:
-        lines.append("--- 风险警示 ---")
+        lines.append(_BOLD + "--- 风险警示 ---" + _RST)
         for alert in risk_alerts:
-            lines.append(f"  [!] {alert}")
+            lines.append(f"  {_YELLOW}[!]{_RST} {alert}")
         lines.append("")
 
     # --- Key Levels ---
-    lines.append("--- 关键价位 ---")
+    lines.append(_BOLD + "--- 关键价位 ---" + _RST)
     support_parts = [f"{val:.2f} ({name})" for name, val in key_levels.get("support", [])]
     resistance_parts = [f"{val:.2f} ({name})" for name, val in key_levels.get("resistance", [])]
     if support_parts:
@@ -857,8 +900,8 @@ def format_report(
     lines.append("")
 
     # --- Position Advice ---
-    lines.append("--- 仓位建议 ---")
+    lines.append(_BOLD + "--- 仓位建议 ---" + _RST)
     lines.append(position_advice)
-    lines.append(separator)
+    lines.append(_CYAN + separator + _RST)
 
     return "\n".join(lines)
