@@ -1,6 +1,6 @@
 {
   "stock_list": "002602 hk2400 002468 513330 512690 159570 512720 515220 159625 159361 159755",
-  "wecom_webhook": "",
+  "wecom_webhook": "https://qyapi.weixin.qq.com/cgi-bin/webhook/send?key=f9ababe2-1de4-4bef-a546-04433ff90315",
   "wecom_msg_format": "text",
   "indicators": {
     "ma": { "enabled": true, "weight": 25 },
