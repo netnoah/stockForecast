@@ -7,6 +7,7 @@ if "%~1"=="" (
     echo 示例:
     echo   run.bat 002602            # 分析世纪华通
     echo   run.bat 002602 600519      # 分析多只股票
+    echo   run.bat -l                # 读取 config.json 中的 stock_list
     echo   run.bat --review           # 查看预测自检报告
     echo   run.bat 002602 --refresh   # 强制刷新缓存数据
     exit /b 0

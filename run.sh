@@ -6,6 +6,7 @@ if [ $# -eq 0 ]; then
     echo "示例:"
     echo "  ./run.sh 002602            # 分析世纪华通"
     echo "  ./run.sh 002602 600519      # 分析多只股票"
+    echo "  ./run.sh -l                # 读取 config.json 中的 stock_list"
     echo "  ./run.sh --review           # 查看预测自检报告"
     echo "  ./run.sh 002602 --refresh   # 强制刷新缓存数据"
     exit 0

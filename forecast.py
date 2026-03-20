@@ -1,4 +1,5 @@
 import argparse
+import re
 import sys
 from datetime import datetime
 
@@ -84,7 +85,7 @@ def analyze_stock(symbol: str, config: dict, refresh: bool = False):
     df = calc_all_indicators(df)
     raw_score, ind_results = calculate_stock_score(df, config)
     modifier, market_results = calculate_market_modifier(config)
-    final_score = max(0, min(100, int(raw_score + modifier)))
+    final_score = max(-100, min(100, int(raw_score + modifier)))
     signal = score_to_signal(final_score)
     key_levels = calculate_key_levels(df)
     risk_alerts = generate_risk_alerts(df, final_score)
@@ -115,6 +116,7 @@ def analyze_stock(symbol: str, config: dict, refresh: bool = False):
 def main():
     parser = argparse.ArgumentParser(description="A股量化分析工具")
     parser.add_argument("symbols", nargs="*", help="股票代码 (如 002602)")
+    parser.add_argument("-l", "--list", action="store_true", help="读取 config.json 中的 stock_list 配置")
     parser.add_argument("--review", action="store_true", help="仅显示预测自检报告")
     parser.add_argument("--refresh", action="store_true", help="强制刷新缓存数据")
     args = parser.parse_args()
@@ -129,7 +131,12 @@ def main():
         print(format_accuracy_report(stats))
         return
 
-    symbols = args.symbols or config.get("stocks", [])
+    if args.list:
+        raw = config.get("stock_list", "")
+        symbols = re.split(r"[,\s]+", raw.strip())
+        symbols = [s for s in symbols if s]
+    else:
+        symbols = args.symbols
     if not symbols:
         print("未指定股票代码，请使用参数或在 config.json 中配置 stocks")
         sys.exit(1)

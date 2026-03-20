@@ -26,8 +26,8 @@ from indicators import calc_ma, calc_macd
 _RST = "\033[0m"
 _BOLD = "\033[1m"
 _DIM = "\033[2m"
-_RED = "\033[32m"
-_GREEN = "\033[31m"
+_BULLISH = "\033[31m"   # 红色 = A股涨
+_BEARISH = "\033[32m"   # 绿色 = A股跌
 _YELLOW = "\033[33m"
 _BLUE = "\033[34m"
 _CYAN = "\033[36m"
@@ -37,22 +37,22 @@ _WHITE = "\033[37m"
 def _signal_color(signal: str) -> str:
     """Return ANSI color for a signal label."""
     if signal in ("强烈买入",):
-        return _RED + _BOLD + signal + _RST
+        return _BULLISH + _BOLD + signal + _RST
     if signal in ("买入",):
-        return _GREEN + _BOLD + signal + _RST
+        return _BULLISH + _BOLD + signal + _RST
     if signal in ("卖出",):
-        return _YELLOW + signal + _RST
+        return _BEARISH + signal + _RST
     if signal in ("强烈卖出",):
-        return _RED + signal + _RST
+        return _BEARISH + signal + _RST
     return _WHITE + signal + _RST
 
 
 def _score_color(score: int) -> str:
     """Return ANSI color for a numeric score."""
-    if score >= 60:
-        return _GREEN + _BOLD + str(score) + _RST
-    if score <= 40:
-        return _RED + str(score) + _RST
+    if score >= 15:
+        return _BULLISH + _BOLD + str(score) + _RST
+    if score <= -15:
+        return _BEARISH + str(score) + _RST
     return _YELLOW + str(score) + _RST
 
 
@@ -61,11 +61,11 @@ def _score_color(score: int) -> str:
 # ---------------------------------------------------------------------------
 
 SIGNAL_RATINGS = [
-    (75, 90, "强烈买入"),
-    (60, 74, "买入"),
-    (45, 59, "观望"),
-    (30, 44, "卖出"),
-    (10, 29, "强烈卖出"),
+    (50, 100, "强烈买入"),
+    (15, 49, "买入"),
+    (-14, 14, "观望"),
+    (-49, -15, "卖出"),
+    (-100, -50, "强烈卖出"),
 ]
 
 # Backward compatibility: English signal names from old CSV data
@@ -77,8 +77,8 @@ _SIGNAL_EN_MAP = {
     "Strong Sell": "强烈卖出",
 }
 
-_SCORE_MIN = -20
-_SCORE_MAX = 20
+_SCORE_MIN = -100
+_SCORE_MAX = 100
 
 INDEX_NAMES = {
     "sh000001": "上证综指",
@@ -113,11 +113,10 @@ def score_to_signal(score: int) -> str:
     """Convert a numeric score to a human-readable signal label.
 
     Args:
-        score: Integer score in the range [10, 90].
+        score: Integer score in the range [-100, 100].
 
     Returns:
-        Signal label: "Strong Buy", "Buy", "Hold", "Sell", or "Strong Sell".
-        Falls back to "Hold" if no range matches.
+        Signal label. Falls back to "观望" if no range matches.
     """
     for low, high, label in SIGNAL_RATINGS:
         if low <= score <= high:
@@ -130,9 +129,9 @@ def score_to_signal(score: int) -> str:
 # ---------------------------------------------------------------------------
 
 
-def _clamp(value: float) -> int:
-    """Clamp a numeric value to the valid score range [-20, +20]."""
-    return int(max(_SCORE_MIN, min(_SCORE_MAX, value)))
+def _clamp(value: float) -> float:
+    """Clamp a numeric value to the valid indicator score range [-20, +20]."""
+    return max(-20.0, min(20.0, value))
 
 
 def _safe(val, default=None):
@@ -148,11 +147,11 @@ def _safe(val, default=None):
 
 
 def score_ma(df: pd.DataFrame) -> tuple[int, str]:
-    """Score based on moving average alignment and price position.
+    """Score based on MA alignment degree and price deviation from MA20.
 
-    Checks:
-    - MA alignment: MA5 > MA10 > MA20 => +10, MA5 < MA10 < MA20 => -10
-    - Price vs MA20: close > MA20 => +5, else => -5
+    Continuous scoring:
+    - Trend strength: (MA5 - MA20) / MA20, scaled to [-10, +10]
+    - Price position: (close - MA20) / MA20, scaled to [-10, +10]
 
     Returns:
         (score, reason) tuple.
@@ -169,40 +168,25 @@ def score_ma(df: pd.DataFrame) -> tuple[int, str]:
     if any(v is None for v in (ma5, ma10, ma20, close)):
         return (0, "MA数据不完整 (NaN)")
 
-    parts = []
-    total = 0
+    # Trend strength: MA5 vs MA20 spread, normalized by price
+    trend = (ma5 - ma20) / ma20 * 200
+    trend = max(-10, min(10, trend))
 
-    # MA alignment
-    if ma5 > ma10 > ma20:
-        total += 10
-        parts.append("多头排列 (MA5>MA10>MA20) +10")
-    elif ma5 < ma10 < ma20:
-        total -= 10
-        parts.append("空头排列 (MA5<MA10<MA20) -10")
-    else:
-        parts.append("均线交织 0")
+    # Price position vs MA20
+    position = (close - ma20) / ma20 * 200
+    position = max(-10, min(10, position))
 
-    # Price vs MA20
-    if close > ma20:
-        total += 5
-        parts.append("收盘价在MA20上方 +5")
-    else:
-        total -= 5
-        parts.append("收盘价在MA20下方 -5")
-
-    return (_clamp(total), "; ".join(parts))
+    total = trend + position
+    reason = f"趋势强度={trend:+.1f}; 价格偏离={position:+.1f}"
+    return (_clamp(total), reason)
 
 
 def score_macd(df: pd.DataFrame) -> tuple[int, str]:
-    """Score based on MACD crossover and histogram trends.
+    """Score based on MACD momentum and histogram trend.
 
-    Checks:
-    - Golden cross (DIF crosses above DEA): +15
-    - Death cross (DIF crosses below DEA): -15
-    - Histogram turns positive: +8
-    - Histogram turns negative: -8
-    - Histogram increasing while positive: +5
-    - Histogram decreasing while negative: -5
+    Continuous scoring:
+    - Momentum: (DIF - DEA) / close, scaled to [-15, +15]
+    - Histogram trend: change rate of histogram, scaled to [-5, +5]
 
     Note: The MACD histogram column in indicators.py is named "macd".
 
@@ -221,58 +205,31 @@ def score_macd(df: pd.DataFrame) -> tuple[int, str]:
     last_dif = _safe(latest.get("dif"))
     last_dea = _safe(latest.get("dea"))
     last_hist = _safe(latest.get("macd"))
+    close = _safe(latest.get("close"))
 
-    if any(v is None for v in (prev_dif, prev_dea, prev_hist, last_dif, last_dea, last_hist)):
+    if any(v is None for v in (prev_dif, prev_dea, prev_hist, last_dif, last_dea, last_hist, close)):
         return (0, "MACD数据不完整 (NaN)")
 
-    parts = []
-    total = 0
+    # Momentum: DIF vs DEA normalized by close price
+    momentum = (last_dif - last_dea) / close * 2000
+    momentum = max(-15, min(15, momentum))
 
-    # Golden cross
-    if prev_dif <= prev_dea and last_dif > last_dea:
-        total += 15
-        parts.append("金叉 (DIF上穿DEA) +15")
+    # Histogram trend: rate of change
+    if abs(prev_hist) > 1e-10:
+        hist_trend = (last_hist - prev_hist) / abs(prev_hist) * 5
+    else:
+        hist_trend = 0
+    hist_trend = max(-5, min(5, hist_trend))
 
-    # Death cross
-    if prev_dif >= prev_dea and last_dif < last_dea:
-        total -= 15
-        parts.append("死叉 (DIF下穿DEA) -15")
-
-    # Histogram turns positive
-    if prev_hist <= 0 and last_hist > 0:
-        total += 8
-        parts.append("柱状图转正 +8")
-
-    # Histogram turns negative
-    if prev_hist >= 0 and last_hist < 0:
-        total -= 8
-        parts.append("柱状图转负 -8")
-
-    # Histogram increasing while positive
-    if last_hist > 0 and last_hist > prev_hist:
-        total += 5
-        parts.append("柱状图正值增大 +5")
-
-    # Histogram decreasing while negative
-    if last_hist < 0 and last_hist < prev_hist:
-        total -= 5
-        parts.append("柱状图负值增大 -5")
-
-    if not parts:
-        parts.append("无MACD信号 0")
-
-    return (_clamp(total), "; ".join(parts))
+    total = momentum + hist_trend
+    reason = f"动量={momentum:+.1f}; 柱状图趋势={hist_trend:+.1f}"
+    return (_clamp(total), reason)
 
 
 def score_rsi(df: pd.DataFrame) -> tuple[int, str]:
-    """Score based on RSI levels.
+    """Score based on RSI as a continuous function.
 
-    Checks:
-    - RSI < 30: +12 (oversold)
-    - RSI 30-40: +5 (approaching oversold)
-    - RSI > 70: -12 (overbought)
-    - RSI 60-70: -3 (approaching overbought)
-    - Otherwise: 0 (neutral)
+    Linear mapping: RSI=0 → +20 (oversold), RSI=50 → 0, RSI=100 → -20 (overbought).
 
     Returns:
         (score, reason) tuple.
@@ -286,26 +243,15 @@ def score_rsi(df: pd.DataFrame) -> tuple[int, str]:
     if rsi is None:
         return (0, "RSI数据不完整 (NaN)")
 
-    if rsi < 30:
-        return (12, f"RSI={rsi:.1f} 超卖，反弹预期 +12")
-    if rsi < 40:
-        return (5, f"RSI={rsi:.1f} 接近超卖 +5")
-    if rsi > 70:
-        return (-12, f"RSI={rsi:.1f} 超买，回调风险 -12")
-    if rsi > 60:
-        return (-3, f"RSI={rsi:.1f} 接近超买 -3")
-    return (0, f"RSI={rsi:.1f} 中性")
+    score = (50 - rsi) * 0.4  # RSI=0→20, RSI=50→0, RSI=100→-20
+    return (_clamp(score), f"RSI={rsi:.1f} → {score:+.1f}")
 
 
 def score_bollinger(df: pd.DataFrame) -> tuple[int, str]:
-    """Score based on Bollinger Band position.
+    """Score based on Bollinger Band position as a continuous function.
 
-    Calculates position within bands: (close - lower) / (upper - lower).
-    - Position < 0.1: +12 (near lower band, support)
-    - Position 0.1-0.3: +5
-    - Position > 0.9: -10 (near upper band, resistance)
-    - Position 0.7-0.9: -3
-    - Otherwise: 0
+    Position in bands mapped linearly:
+    position=0 (lower band) → +20, position=0.5 → 0, position=1 (upper band) → -20.
 
     Returns:
         (score, reason) tuple.
@@ -326,27 +272,17 @@ def score_bollinger(df: pd.DataFrame) -> tuple[int, str]:
         return (0, "布林带宽度为零，无法计算位置")
 
     position = (close - boll_lower) / band_range
+    score = (0.5 - position) * 40  # pos=0→20, pos=0.5→0, pos=1→-20
 
-    if position < 0.1:
-        return (12, f"位置={position:.2f} 靠近下轨 (支撑) +12")
-    if position < 0.3:
-        return (5, f"位置={position:.2f} 处于下轨区域 +5")
-    if position > 0.9:
-        return (-10, f"位置={position:.2f} 靠近上轨 (压力) -10")
-    if position > 0.7:
-        return (-3, f"位置={position:.2f} 处于上轨区域 -3")
-    return (0, f"位置={position:.2f} 中性")
+    return (_clamp(score), f"位置={position:.2f} → {score:+.1f}")
 
 
 def score_kdj(df: pd.DataFrame) -> tuple[int, str]:
-    """Score based on KDJ crossover and extreme J values.
+    """Score based on KDJ values as a continuous function.
 
-    Checks:
-    - KDJ golden cross (K crosses above D): +12
-    - KDJ death cross (K crosses below D): -12
-    - J < 20 for two consecutive days: +10 (oversold)
-    - J > 80 for two consecutive days: -10 (overbought)
-    - Otherwise: 0
+    Continuous scoring:
+    - K-D momentum: (K - D) scaled to [-10, +10]
+    - J overbought/oversold: (50 - J) scaled to [-10, +10]
 
     Returns:
         (score, reason) tuple.
@@ -354,58 +290,33 @@ def score_kdj(df: pd.DataFrame) -> tuple[int, str]:
     if len(df) < 2:
         return (0, "数据不足")
 
-    prev = df.iloc[-2]
     latest = df.iloc[-1]
 
-    prev_k = _safe(prev.get("k"))
-    prev_d = _safe(prev.get("d"))
-    prev_j = _safe(prev.get("j"))
     last_k = _safe(latest.get("k"))
     last_d = _safe(latest.get("d"))
     last_j = _safe(latest.get("j"))
 
-    if any(v is None for v in (prev_k, prev_d, prev_j, last_k, last_d, last_j)):
+    if any(v is None for v in (last_k, last_d, last_j)):
         return (0, "KDJ数据不完整 (NaN)")
 
-    parts = []
-    total = 0
+    # K-D momentum
+    kd_momentum = (last_k - last_d) / 10
+    kd_momentum = max(-10, min(10, kd_momentum))
 
-    # KDJ golden cross
-    if prev_k < prev_d and last_k > last_d:
-        total += 12
-        parts.append("KDJ金叉 (K上穿D) +12")
+    # J value: like RSI, low J = oversold (positive), high J = overbought (negative)
+    j_score = (50 - last_j) / 5
+    j_score = max(-10, min(10, j_score))
 
-    # KDJ death cross
-    if prev_k > prev_d and last_k < last_d:
-        total -= 12
-        parts.append("KDJ死叉 (K下穿D) -12")
-
-    # J oversold
-    if last_j < 20 and prev_j < 20:
-        total += 10
-        parts.append(f"J={last_j:.1f} 连续2日超卖 +10")
-
-    # J overbought
-    if last_j > 80 and prev_j > 80:
-        total -= 10
-        parts.append(f"J={last_j:.1f} 连续2日超买 -10")
-
-    if not parts:
-        parts.append("无KDJ信号 0")
-
-    return (_clamp(total), "; ".join(parts))
+    total = kd_momentum + j_score
+    reason = f"K-D动量={kd_momentum:+.1f}; J值={last_j:.1f}→{j_score:+.1f}"
+    return (_clamp(total), reason)
 
 
 def score_volume(df: pd.DataFrame) -> tuple[int, str]:
-    """Score based on volume-price relationship.
+    """Score based on volume-price relationship as a continuous function.
 
-    Checks:
-    - vol_ratio > 1.5 AND price up: +12 (strong buying)
-    - vol_ratio > 1.5 AND price down: -10 (distribution)
-    - vol_ratio < 0.5 AND price up: -5 (volume-price divergence)
-    - vol_ratio < 0.5 AND price down: +5 (selling exhaustion)
-    - vol_ratio > 1.0 AND price up: +5
-    - Otherwise: 0
+    score = (vol_ratio - 1) * price_direction * 20
+   放量上涨正分，放量下跌负分，缩量下跌正分（卖盘衰竭），缩量上涨负分（量价背离）。
 
     Returns:
         (score, reason) tuple.
@@ -423,19 +334,16 @@ def score_volume(df: pd.DataFrame) -> tuple[int, str]:
     if any(v is None for v in (vol_ratio, prev_close, last_close)):
         return (0, "成交量数据不完整 (NaN)")
 
-    price_up = last_close > prev_close
+    price_direction = 1 if last_close > prev_close else -1
+    vol_deviation = vol_ratio - 1  # >0 = above average, <0 = below average
+    score = vol_deviation * price_direction * 20
 
-    if vol_ratio > 1.5 and price_up:
-        return (12, f"量比={vol_ratio:.2f} 放量上涨 = 强势买入 +12")
-    if vol_ratio > 1.5 and not price_up:
-        return (-10, f"量比={vol_ratio:.2f} 放量下跌 = 派发 -10")
-    if vol_ratio < 0.5 and price_up:
-        return (-5, f"量比={vol_ratio:.2f} 缩量上涨 = 量价背离 -5")
-    if vol_ratio < 0.5 and not price_up:
-        return (5, f"量比={vol_ratio:.2f} 缩量下跌 = 卖盘衰竭 +5")
-    if vol_ratio > 1.0 and price_up:
-        return (5, f"量比={vol_ratio:.2f} 温和放量上涨 +5")
-    return (0, f"量比={vol_ratio:.2f} 无量能信号")
+    if price_direction > 0:
+        direction_text = "上涨"
+    else:
+        direction_text = "下跌"
+
+    return (_clamp(score), f"量比={vol_ratio:.2f} {direction_text} → {score:+.1f}")
 
 
 # ---------------------------------------------------------------------------
@@ -492,18 +400,18 @@ def calculate_stock_score(df: pd.DataFrame, config: dict) -> tuple[int, list[dic
 
         results.append({
             "name": name,
-            "score": score,
+            "score": score * 5,
             "reason": reason,
         })
 
-    # Calculate raw score centered at 50
+    # Calculate raw score in [-100, +100] range
     if total_weight > 0:
-        raw_score = 50 + (weighted_sum / total_weight)
+        raw_score = (weighted_sum / total_weight) * 5
     else:
-        raw_score = 50.0
+        raw_score = 0.0
 
     # Clamp to valid signal range
-    raw_score = max(0, min(100, raw_score))
+    raw_score = max(-100, min(100, raw_score))
 
     return (int(raw_score), results)
 
@@ -651,16 +559,16 @@ def calculate_position_advice(score: int, key_levels: dict) -> str:
     Returns:
         Human-readable position advice string.
     """
-    if score >= 75:
+    if score >= 50:
         pct = "60%"
         signal = "强烈买入"
-    elif score >= 60:
+    elif score >= 15:
         pct = "40%"
         signal = "买入信号"
-    elif score >= 45:
+    elif score >= -14:
         pct = "20%"
         signal = "中性"
-    elif score >= 30:
+    elif score >= -49:
         pct = "10%"
         signal = "卖出信号"
     else:
@@ -714,9 +622,9 @@ def generate_risk_alerts(df: pd.DataFrame, score: int) -> list[str]:
             if abs(daily_change) > 5:
                 alerts.append(f"日涨跌幅较大 ({daily_change:.1f}%)，注意波动")
 
-    if score >= 70:
+    if score >= 40:
         alerts.append("多头得分较高 — 已有持仓可考虑部分获利了结")
-    elif score <= 30:
+    elif score <= -40:
         alerts.append("得分偏低 — 避免加仓，等待反转信号")
 
     return alerts
@@ -792,7 +700,7 @@ def format_report(
             date_str = str(raw_date)[:10] if raw_date else ""
 
     signal = score_to_signal(score)
-    prob = max(0, min(100, score))
+    prob = int((score + 100) / 2)  # Map [-100,+100] to [0,100]
 
     lines.append(_CYAN + separator + _RST)
     lines.append(f"  {_BOLD}{stock_name} ({symbol}){_RST} | {date_str}")
@@ -804,7 +712,7 @@ def format_report(
         close_val = float(realtime_data["close"])
         open_val = float(realtime_data["open"])
         change_pct = (close_val / open_val - 1) * 100 if open_val != 0 else 0.0
-        pct_color = _GREEN if change_pct >= 0 else _RED
+        pct_color = _BULLISH if change_pct >= 0 else _BEARISH
         lines.append(f"当前价格: {_BOLD}{close_val:.2f}{_RST}  今日涨跌: {pct_color}{change_pct:+.2f}%{_RST}")
         lines.append(_DIM + "[交易时段] 盘中实时分析" + _RST)
     else:
@@ -814,7 +722,7 @@ def format_report(
             prev_close = _safe(prev.get("close"))
             if all(v is not None for v in (last_close, prev_close)) and prev_close != 0:
                 change_pct = (last_close - prev_close) / prev_close * 100
-                pct_color = _GREEN if change_pct >= 0 else _RED
+                pct_color = _BULLISH if change_pct >= 0 else _BEARISH
                 lines.append(f"当前价格: {_BOLD}{last_close:.2f}{_RST}  涨跌幅: {pct_color}{change_pct:+.2f}%{_RST}")
             else:
                 lines.append(f"当前价格: {_BOLD}{last_close:.2f}{_RST}  涨跌幅: N/A")
@@ -842,7 +750,7 @@ def format_report(
         rt_high = float(realtime_data["high"])
         rt_low = float(realtime_data["low"])
         lines.append(_BOLD + "--- 实时行情 ---" + _RST)
-        lines.append(f"现价: {_BOLD}{rt_close:.2f}{_RST} | 开盘: {rt_open:.2f} | 最高: {_GREEN}{rt_high:.2f}{_RST} | 最低: {_RED}{rt_low:.2f}{_RST}")
+        lines.append(f"现价: {_BOLD}{rt_close:.2f}{_RST} | 开盘: {rt_open:.2f} | 最高: {_BULLISH}{rt_high:.2f}{_RST} | 最低: {_BEARISH}{rt_low:.2f}{_RST}")
         daily_range = rt_high - rt_low
         if daily_range > 0:
             pct_in_range = (rt_close - rt_low) / daily_range
@@ -863,7 +771,7 @@ def format_report(
         lines.append(_BOLD + "--- 大盘环境 ---" + _RST)
         for r in market_results:
             icon = _trend_icon(r["trend"])
-            trend_color = _GREEN if r["trend"] == "看涨" else (_RED if r["trend"] == "看跌" else _WHITE)
+            trend_color = _BULLISH if r["trend"] == "看涨" else (_BEARISH if r["trend"] == "看跌" else _WHITE)
             lines.append(f"  [{icon}] {r['name']}: {trend_color}{r['trend']}{_RST}")
         bullish_count = sum(1 for r in market_results if r["trend"] == "看涨")
         bearish_count = sum(1 for r in market_results if r["trend"] == "看跌")
@@ -875,9 +783,10 @@ def format_report(
     lines.append(_BOLD + "--- 技术指标 ---" + _RST)
     for ind in indicator_results:
         icon = _score_icon(ind["score"])
-        score_sign = "+" if ind["score"] >= 0 else ""
-        sc = _GREEN if ind["score"] > 0 else (_RED if ind["score"] < 0 else _DIM)
-        lines.append(f"  [{icon}] {ind['name'].upper()}: {ind['reason']} ({score_sign}{sc}{ind['score']}{_RST})")
+        display_score = round(ind["score"])
+        score_sign = "+" if display_score >= 0 else ""
+        sc = _BULLISH if display_score > 0 else (_BEARISH if display_score < 0 else _DIM)
+        lines.append(f"  [{icon}] {ind['name'].upper()}: {ind['reason']} ({score_sign}{sc}{display_score}{_RST})")
     if is_intraday:
         lines.append(_DIM + "  [!] 注意: 最新K线为盘中数据(未完成)，指标值为近似值" + _RST)
     lines.append("")
