@@ -52,10 +52,13 @@ def _session_label() -> str:
 
 
 def fetch_actual_close(symbol: str, pred_date: str) -> float | None:
-    """Fetch actual closing price for the next trading day after pred_date (used by tracker backfill)."""
+    """Fetch actual closing price for the next trading day after pred_date (used by tracker backfill).
+
+    Tries daily K-line first (refresh=True to bypass stale cache), then falls
+    back to the realtime quote API which is available immediately after market close.
+    """
     try:
-        df = get_stock_history(symbol)
-        # Find the row matching pred_date
+        df = get_stock_history(symbol, refresh=True)
         df["date_str"] = df["date"].astype(str).str[:10]
         match = df[df["date_str"] == pred_date]
         if len(match) == 0:
@@ -63,6 +66,12 @@ def fetch_actual_close(symbol: str, pred_date: str) -> float | None:
         idx = match.index[0]
         if idx + 1 < len(df):
             return float(df.iloc[idx + 1]["close"])
+
+        # K-line doesn't have next day yet (common after hours — daily K-line
+        # lags behind the realtime quote).  Fall back to realtime quote.
+        rt = get_realtime_quote(symbol)
+        if rt and rt.get("close") is not None:
+            return float(rt["close"])
         return None
     except Exception:
         return None

@@ -160,7 +160,7 @@ def backfill_predictions(fetch_actual_fn) -> int:
             hit = _calculate_hit(signal, actual_change)
 
             # Update prediction
-            pred["actual_change"] = f"{actual_change:+.4f}"
+            pred["actual_change"] = f"{actual_change * 100:+.2f}%"
             pred["hit"] = "1" if hit else "0"
 
             changes_made = True
@@ -271,7 +271,7 @@ def calculate_accuracy() -> dict:
         change_str = p.get("actual_change", "").strip()
         if not change_str:
             continue
-        change = float(change_str) * 100  # convert to percentage
+        change = float(change_str.replace("%", ""))  # already in percentage
         is_hit = p["hit"] == "1"
         if is_hit:
             win_changes.append(change)
