@@ -147,11 +147,12 @@ def _safe(val, default=None):
 
 
 def score_ma(df: pd.DataFrame) -> tuple[int, str]:
-    """Score based on MA alignment degree and price deviation from MA20.
+    """Score based on MA alignment, MA60 position, and price deviation.
 
     Continuous scoring:
-    - Trend strength: (MA5 - MA20) / MA20, scaled to [-10, +10]
-    - Price position: (close - MA20) / MA20, scaled to [-10, +10]
+    - Trend strength: (MA5 - MA20) / MA20, scaled to [-6, +6]
+    - MA alignment: bonus for bullish/bearish alignment, clamped [-6, +6]
+    - Price position vs MA20: (close - MA20) / MA20, scaled to [-8, +8]
 
     Returns:
         (score, reason) tuple.
@@ -163,21 +164,52 @@ def score_ma(df: pd.DataFrame) -> tuple[int, str]:
     ma5 = _safe(latest.get("ma5"))
     ma10 = _safe(latest.get("ma10"))
     ma20 = _safe(latest.get("ma20"))
+    ma60 = _safe(latest.get("ma60"))
     close = _safe(latest.get("close"))
 
     if any(v is None for v in (ma5, ma10, ma20, close)):
         return (0, "MA数据不完整 (NaN)")
 
-    # Trend strength: MA5 vs MA20 spread, normalized by price
+    # 1) Trend strength: MA5 vs MA20 spread, normalized by price
     trend = (ma5 - ma20) / ma20 * 200
-    trend = max(-10, min(10, trend))
+    trend = max(-6, min(6, trend))
 
-    # Price position vs MA20
+    # 2) MA alignment bonus
+    #    多头排列 MA5 > MA10 > MA20 > MA60 → +6
+    #    空头排列 MA5 < MA10 < MA20 < MA60 → -6
+    #    Mixed → proportional score
+    parts = []
+    has_ma60 = ma60 is not None
+
+    if ma5 > ma10 > ma20:
+        parts.append(1)
+    elif ma5 < ma10 < ma20:
+        parts.append(-1)
+    else:
+        parts.append(0)
+
+    if has_ma60:
+        if ma20 > ma60:
+            parts.append(1)
+        elif ma20 < ma60:
+            parts.append(-1)
+        else:
+            parts.append(0)
+
+    alignment = sum(parts) / len(parts) * 6
+    alignment = max(-6, min(6, alignment))
+
+    # 3) Price position vs MA20
     position = (close - ma20) / ma20 * 200
-    position = max(-10, min(10, position))
+    position = max(-8, min(8, position))
 
-    total = trend + position
-    reason = f"趋势强度={trend:+.1f}; 价格偏离={position:+.1f}"
+    total = trend + alignment + position
+
+    # Build reason text
+    alignment_labels = {1: "多头", -1: "空头", 0: "混乱"}
+    short_label = alignment_labels.get(parts[0], "混乱")
+    long_label = alignment_labels.get(parts[1], "无MA60") if has_ma60 else "无MA60"
+    reason = f"趋势={trend:+.1f}; 排列={short_label}/{long_label}={alignment:+.1f}; 偏离={position:+.1f}"
     return (_clamp(total), reason)
 
 
@@ -226,10 +258,35 @@ def score_macd(df: pd.DataFrame) -> tuple[int, str]:
     return (_clamp(total), reason)
 
 
-def score_rsi(df: pd.DataFrame) -> tuple[int, str]:
-    """Score based on RSI as a continuous function.
+def _rsi分段映射(rsi: float) -> float:
+    """Map RSI to score using a segmented function.
 
-    Linear mapping: RSI=0 → +20 (oversold), RSI=50 → 0, RSI=100 → -20 (overbought).
+    Compresses sensitivity in the neutral zone (30-70) and amplifies
+    signals in extreme zones (<20, >80).
+
+    Breakpoints:
+        RSI=0 → +20   (deeply oversold)
+        RSI=20 → +15  (oversold)
+        RSI=30 → +8   (mildly oversold)
+        RSI=50 → 0    (neutral)
+        RSI=70 → -8   (mildly overbought)
+        RSI=80 → -15  (overbought)
+        RSI=100 → -20 (deeply overbought)
+    """
+    breakpoints = [
+        (0, 20), (20, 15), (30, 8), (50, 0), (70, -8), (80, -15), (100, -20),
+    ]
+    for i in range(len(breakpoints) - 1):
+        lo_rsi, lo_score = breakpoints[i]
+        hi_rsi, hi_score = breakpoints[i + 1]
+        if rsi <= hi_rsi:
+            t = (rsi - lo_rsi) / (hi_rsi - lo_rsi) if hi_rsi != lo_rsi else 0
+            return lo_score + t * (hi_score - lo_score)
+    return breakpoints[-1][1]
+
+
+def score_rsi(df: pd.DataFrame) -> tuple[int, str]:
+    """Score based on RSI using a segmented mapping.
 
     Returns:
         (score, reason) tuple.
@@ -243,26 +300,29 @@ def score_rsi(df: pd.DataFrame) -> tuple[int, str]:
     if rsi is None:
         return (0, "RSI数据不完整 (NaN)")
 
-    score = (50 - rsi) * 0.4  # RSI=0→20, RSI=50→0, RSI=100→-20
+    score = _rsi分段映射(rsi)
     return (_clamp(score), f"RSI={rsi:.1f} → {score:+.1f}")
 
 
 def score_bollinger(df: pd.DataFrame) -> tuple[int, str]:
-    """Score based on Bollinger Band position as a continuous function.
+    """Score based on Bollinger Band position and squeeze detection.
 
-    Position in bands mapped linearly:
-    position=0 (lower band) → +20, position=0.5 → 0, position=1 (upper band) → -20.
+    - Position score [-14, +14]: price location within bands, scaled down
+      in narrow bands (squeeze) to avoid false signals.
+    - Squeeze bonus [-6, +6]: bandwidth narrowing vs 20-day average indicates
+      impending breakout direction from price trend.
 
     Returns:
         (score, reason) tuple.
     """
-    if len(df) < 1:
+    if len(df) < 2:
         return (0, "数据不足")
 
     latest = df.iloc[-1]
     close = _safe(latest.get("close"))
     boll_upper = _safe(latest.get("boll_upper"))
     boll_lower = _safe(latest.get("boll_lower"))
+    boll_width = _safe(latest.get("boll_width"))
 
     if any(v is None for v in (close, boll_upper, boll_lower)):
         return (0, "布林带数据不完整 (NaN)")
@@ -271,10 +331,49 @@ def score_bollinger(df: pd.DataFrame) -> tuple[int, str]:
     if band_range == 0:
         return (0, "布林带宽度为零，无法计算位置")
 
+    # 1) Position score, attenuated by squeeze
     position = (close - boll_lower) / band_range
-    score = (0.5 - position) * 40  # pos=0→20, pos=0.5→0, pos=1→-20
+    position_score = (0.5 - position) * 28  # max ±14
 
-    return (_clamp(score), f"位置={position:.2f} → {score:+.1f}")
+    # Squeeze: narrow band → position signals are unreliable, scale down
+    if boll_width is not None and boll_width > 0:
+        # Typical A-share boll_width range: 0.02-0.15
+        # Below 0.04 = tight squeeze, attenuate position score
+        squeeze_factor = min(boll_width / 0.04, 1.0)
+        position_score *= squeeze_factor
+        squeeze_label = "收窄" if squeeze_factor < 0.8 else "正常"
+    else:
+        squeeze_factor = 1.0
+        squeeze_label = "未知"
+
+    position_score = max(-14, min(14, position_score))
+
+    # 2) Squeeze bonus: compare current width to 20-day average width
+    squeeze_bonus = 0.0
+    widths = df["boll_width"].tail(21).dropna()
+    if len(widths) >= 10 and boll_width is not None:
+        avg_width = widths.iloc[:-1].mean()  # exclude current day
+        if avg_width > 0:
+            width_ratio = boll_width / avg_width
+            # width_ratio < 0.7 = significant squeeze → score based on recent
+            # price direction (squeeze resolves in trend direction)
+            if width_ratio < 0.7:
+                prev_close = _safe(df.iloc[-2].get("close"))
+                if prev_close is not None and prev_close != 0:
+                    direction = 1 if close > prev_close else -1
+                    intensity = (0.7 - width_ratio) / 0.7  # 0→0, 0→1
+                    squeeze_bonus = direction * intensity * 6
+                else:
+                    squeeze_bonus = 0
+
+    squeeze_bonus = max(-6, min(6, squeeze_bonus))
+
+    total = position_score + squeeze_bonus
+    reason = (
+        f"位置={position:.2f}({squeeze_label}); "
+        f"squeeze={squeeze_bonus:+.1f} → {total:+.1f}"
+    )
+    return (_clamp(total), reason)
 
 
 def score_kdj(df: pd.DataFrame) -> tuple[int, str]:
@@ -303,8 +402,22 @@ def score_kdj(df: pd.DataFrame) -> tuple[int, str]:
     kd_momentum = (last_k - last_d) / 10
     kd_momentum = max(-10, min(10, kd_momentum))
 
-    # J value: like RSI, low J = oversold (positive), high J = overbought (negative)
-    j_score = (50 - last_j) / 5
+    # J value: J can exceed [0,100] (often 110-120 or negative)
+    # Use segmented mapping: compress neutral zone, amplify extremes
+    # Breakpoints: J=-20→+10, J=20→+5, J=50→0, J=80→-5, J=100→-8, J=120→-10
+    j_breakpoints = [
+        (-20, 10), (20, 5), (50, 0), (80, -5), (100, -8), (120, -10),
+    ]
+    j_score = 0.0
+    for i in range(len(j_breakpoints) - 1):
+        lo_j, lo_s = j_breakpoints[i]
+        hi_j, hi_s = j_breakpoints[i + 1]
+        if last_j <= hi_j:
+            t = (last_j - lo_j) / (hi_j - lo_j) if hi_j != lo_j else 0
+            j_score = lo_s + t * (hi_s - lo_s)
+            break
+    else:
+        j_score = j_breakpoints[-1][1]
     j_score = max(-10, min(10, j_score))
 
     total = kd_momentum + j_score
@@ -334,14 +447,18 @@ def score_volume(df: pd.DataFrame) -> tuple[int, str]:
     if any(v is None for v in (vol_ratio, prev_close, last_close)):
         return (0, "成交量数据不完整 (NaN)")
 
-    price_direction = 1 if last_close > prev_close else -1
-    vol_deviation = vol_ratio - 1  # >0 = above average, <0 = below average
-    score = vol_deviation * price_direction * 20
+    # 涨跌幅过小视为平盘，不产生量价信号
+    change_pct = (last_close - prev_close) / prev_close * 100 if prev_close != 0 else 0.0
+    if abs(change_pct) < 0.5:
+        return (0, f"量比={vol_ratio:.2f} 平盘(涨跌{change_pct:+.2f}%) → 无信号")
 
-    if price_direction > 0:
-        direction_text = "上涨"
-    else:
-        direction_text = "下跌"
+    # 涨跌幅作为方向权重: |change|越大, 量价信号越可信
+    direction_weight = min(abs(change_pct) / 3.0, 1.0)  # 3%涨跌幅达到满权重
+    price_direction = 1 if change_pct > 0 else -1
+    vol_deviation = vol_ratio - 1  # >0 = above average, <0 = below average
+    score = vol_deviation * price_direction * 20 * direction_weight
+
+    direction_text = f"{'上涨' if price_direction > 0 else '下跌'}{abs(change_pct):.1f}%"
 
     return (_clamp(score), f"量比={vol_ratio:.2f} {direction_text} → {score:+.1f}")
 

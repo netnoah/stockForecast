@@ -2,6 +2,10 @@ import csv
 import os
 from datetime import datetime
 
+# A股交易成本: 印花税0.05%(卖出) + 佣金约0.025%(买卖各一次) ≈ 0.1% 单边
+# 来回成本约 0.15%, 涨跌超过此阈值才算有效 hit
+_ROUND_TRIP_COST = 0.0015  # 0.15%
+
 _PREDICTIONS_FILE = os.path.join(os.path.dirname(os.path.abspath(__file__)), "data", "predictions.csv")
 _FIELDS = ["date", "symbol", "name", "price", "signal", "score", "pred_up_prob", "actual_change", "hit"]
 
@@ -176,6 +180,10 @@ def _calculate_hit(signal: str, actual_change: float) -> bool:
     """
     Determine if a prediction was a hit.
 
+    Buy/sell signals require direction correctness AND sufficient magnitude
+    to cover round-trip trading cost (~0.15%). Hold signals count as hit
+    when next-day fluctuation is within 1%.
+
     Args:
         signal: Trading signal
         actual_change: Actual price change (as decimal, e.g., 0.0123 for +1.23%)
@@ -187,17 +195,16 @@ def _calculate_hit(signal: str, actual_change: float) -> bool:
     normalized = _normalize_signal(signal)
 
     if normalized in ("强烈买入", "买入"):
-        return actual_up
+        return actual_up and abs(actual_change) > _ROUND_TRIP_COST
     elif normalized in ("强烈卖出", "卖出"):
-        return not actual_up
-    else:  # Hold
-        # Hold signals always count as miss per specification
-        return False
+        return not actual_up and abs(actual_change) > _ROUND_TRIP_COST
+    else:  # Hold / 观望
+        return abs(actual_change) < 0.01  # ±1%
 
 
 def calculate_accuracy() -> dict:
     """
-    Calculate prediction accuracy statistics.
+    Calculate prediction accuracy statistics including profit/loss ratio.
 
     Returns:
         Dictionary containing:
@@ -205,6 +212,10 @@ def calculate_accuracy() -> dict:
         - verified: Number of predictions with actual results
         - overall: Overall accuracy percentage (None if no verified predictions)
         - by_signal: Accuracy breakdown by signal type
+        - avg_profit: Average return of winning trades (as %)
+        - avg_loss: Average loss of losing trades (as %)
+        - profit_loss_ratio: avg_profit / abs(avg_loss) (None if no losses)
+        - expectancy: Expected return per trade (as %)
     """
     predictions = read_predictions()
 
@@ -213,7 +224,11 @@ def calculate_accuracy() -> dict:
             "total": 0,
             "verified": 0,
             "overall": None,
-            "by_signal": {}
+            "by_signal": {},
+            "avg_profit": None,
+            "avg_loss": None,
+            "profit_loss_ratio": None,
+            "expectancy": None,
         }
 
     # Filter predictions with actual results
@@ -227,12 +242,53 @@ def calculate_accuracy() -> dict:
             "total": total,
             "verified": 0,
             "overall": None,
-            "by_signal": {}
+            "by_signal": {},
+            "avg_profit": None,
+            "avg_loss": None,
+            "profit_loss_ratio": None,
+            "expectancy": None,
         }
 
     # Calculate overall accuracy
     hits = sum(1 for p in verified if p["hit"] == "1")
     overall = (hits / verified_count) * 100
+
+    # Calculate profit/loss ratio from directional signals (exclude 观望)
+    directional = [p for p in verified if _normalize_signal(p["signal"]) != "观望"]
+
+    win_changes = []
+    loss_changes = []
+    for p in directional:
+        change_str = p.get("actual_change", "").strip()
+        if not change_str:
+            continue
+        change = float(change_str) * 100  # convert to percentage
+        is_hit = p["hit"] == "1"
+        if is_hit:
+            win_changes.append(change)
+        else:
+            loss_changes.append(change)
+
+    avg_profit = sum(win_changes) / len(win_changes) if win_changes else None
+    avg_loss = sum(loss_changes) / len(loss_changes) if loss_changes else None
+
+    if avg_profit is not None and avg_loss is not None and avg_loss != 0:
+        profit_loss_ratio = avg_profit / abs(avg_loss)
+    elif avg_profit is not None and avg_loss is None:
+        profit_loss_ratio = float("inf")
+    else:
+        profit_loss_ratio = None
+
+    # Expectancy = hit_rate * avg_profit - miss_rate * avg_loss
+    if directional and avg_profit is not None:
+        dir_hits = sum(1 for p in directional if p["hit"] == "1")
+        dir_total = len(directional)
+        hit_rate = dir_hits / dir_total
+        miss_rate = 1 - hit_rate
+        avg_l = abs(avg_loss) if avg_loss is not None else 0
+        expectancy = hit_rate * avg_profit - miss_rate * avg_l
+    else:
+        expectancy = None
 
     # Calculate by signal
     signals = ["强烈买入", "买入", "观望", "卖出", "强烈卖出"]
@@ -246,14 +302,18 @@ def calculate_accuracy() -> dict:
             by_signal[signal] = {
                 "total": signal_total,
                 "hits": signal_hits,
-                "accuracy": (signal_hits / signal_total) * 100
+                "accuracy": (signal_hits / signal_total) * 100,
             }
 
     return {
         "total": total,
         "verified": verified_count,
         "overall": overall,
-        "by_signal": by_signal
+        "by_signal": by_signal,
+        "avg_profit": avg_profit,
+        "avg_loss": avg_loss,
+        "profit_loss_ratio": profit_loss_ratio,
+        "expectancy": expectancy,
     }
 
 
@@ -281,6 +341,28 @@ def format_accuracy_report(stats: dict) -> str:
     hits = sum(s['hits'] for s in stats['by_signal'].values())
 
     lines.append(f"整体准确率: {hits}/{verified} ({overall:.1f}%)")
+    lines.append(f"交易成本阈值: {_ROUND_TRIP_COST * 100:.2f}%")
+
+    # Profit/loss ratio
+    avg_profit = stats.get("avg_profit")
+    avg_loss = stats.get("avg_loss")
+    pl_ratio = stats.get("profit_loss_ratio")
+    expectancy = stats.get("expectancy")
+
+    if avg_profit is not None or avg_loss is not None:
+        profit_str = f"+{avg_profit:.2f}%" if avg_profit is not None else "N/A"
+        loss_str = f"{avg_loss:.2f}%" if avg_loss is not None else "N/A"
+        if pl_ratio is not None and pl_ratio != float("inf"):
+            ratio_str = f"{pl_ratio:.2f}"
+        elif pl_ratio == float("inf"):
+            ratio_str = "inf (无亏损)"
+        else:
+            ratio_str = "N/A"
+        lines.append(f"平均盈利: {profit_str} | 平均亏损: {loss_str}")
+        lines.append(f"盈亏比: {ratio_str}")
+        if expectancy is not None:
+            exp_sign = "+" if expectancy >= 0 else ""
+            lines.append(f"单笔期望收益: {exp_sign}{expectancy:.3f}%")
     lines.append("")
 
     # Format each signal
