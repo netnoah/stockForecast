@@ -67,6 +67,10 @@ def calc_macd(
 def calc_rsi(df: pd.DataFrame, period: int = 14) -> pd.DataFrame:
     """Add Relative Strength Index (RSI) column to the DataFrame.
 
+    Uses Wilder's smoothing method (same as TongDaXin, TongHuaShun, EastMoney):
+    - First 'period' values use simple moving average as seed.
+    - Subsequent values use recursive: avg = (1/period) * curr + ((period-1)/period) * prev.
+
     Args:
         df: DataFrame with columns: date, open, high, low, close, volume.
         period: RSI calculation period. Default: 14.
@@ -81,13 +85,39 @@ def calc_rsi(df: pd.DataFrame, period: int = 14) -> pd.DataFrame:
     gain = delta.where(delta > 0, 0.0)
     loss = (-delta).where(delta < 0, 0.0)
 
-    avg_gain = gain.ewm(alpha=1 / period, min_periods=period, adjust=False).mean()
-    avg_loss = loss.ewm(alpha=1 / period, min_periods=period, adjust=False).mean()
+    gain_arr = gain.values
+    loss_arr = loss.values
+    length = len(gain_arr)
 
-    rs = avg_gain / avg_loss.replace(0, np.inf)
-    rsi = 100 - (100 / (1 + rs))
+    rsi_vals = np.full(length, np.nan)
 
-    result["rsi"] = rsi
+    # Find first valid index (skip the initial NaN from diff)
+    start = 1  # diff() makes index 0 NaN
+    while start < length and (np.isnan(gain_arr[start]) or np.isnan(loss_arr[start])):
+        start += 1
+
+    # Need at least 'period' valid values after start for SMA seed
+    seed_end = start + period
+    if seed_end > length:
+        result["rsi"] = rsi_vals
+        return result
+
+    # Seed: simple average of first 'period' gains/losses
+    avg_gain = np.mean(gain_arr[start:seed_end])
+    avg_loss = np.mean(loss_arr[start:seed_end])
+
+    for i in range(start, length):
+        if i >= seed_end:
+            avg_gain = (avg_gain * (period - 1) + gain_arr[i]) / period
+            avg_loss = (avg_loss * (period - 1) + loss_arr[i]) / period
+
+        if avg_loss == 0:
+            rsi_vals[i] = 100.0
+        else:
+            rs = avg_gain / avg_loss
+            rsi_vals[i] = 100.0 - (100.0 / (1.0 + rs))
+
+    result["rsi"] = rsi_vals
 
     return result
 
@@ -132,6 +162,9 @@ def calc_bollinger(
 def calc_kdj(df: pd.DataFrame, n: int = 9, m1: int = 3, m2: int = 3) -> pd.DataFrame:
     """Add KDJ (Stochastic Oscillator) columns to the DataFrame.
 
+    Uses the traditional SMA recursive smoothing (same as TongDaXin, TongHuaShun,
+    EastMoney) with initial K/D values of 50, matching A-share market convention.
+
     Args:
         df: DataFrame with columns: date, open, high, low, close, volume.
         n: RSV calculation period. Default: 9.
@@ -140,8 +173,8 @@ def calc_kdj(df: pd.DataFrame, n: int = 9, m1: int = 3, m2: int = 3) -> pd.DataF
 
     Returns:
         New DataFrame with added K, D, J columns.
-        - K: Fast stochastic line
-        - D: Slow stochastic line
+        - K: Fast stochastic line (SMA smoothed RSV)
+        - D: Slow stochastic line (SMA smoothed K)
         - J: Derived line = 3*K - 2*D
     """
     result = df.copy()
@@ -152,17 +185,39 @@ def calc_kdj(df: pd.DataFrame, n: int = 9, m1: int = 3, m2: int = 3) -> pd.DataF
     low_min = low.rolling(window=n, min_periods=n).min()
     high_max = high.rolling(window=n, min_periods=n).max()
 
-    # Handle division by zero
     denominator = (high_max - low_min).replace(0, np.nan)
     rsv = (close - low_min) / denominator * 100
 
-    k = rsv.ewm(alpha=1 / m1, adjust=False).mean()
-    d = k.ewm(alpha=1 / m2, adjust=False).mean()
-    j = 3 * k - 2 * d
+    # Traditional SMA recursive: K = (m1-1)/m1 * K_prev + 1/m1 * RSV
+    k_vals = np.full(len(df), np.nan)
+    d_vals = np.full(len(df), np.nan)
+    j_vals = np.full(len(df), np.nan)
 
-    result["k"] = k
-    result["d"] = d
-    result["j"] = j
+    k_prev = 50.0
+    d_prev = 50.0
+
+    for i in range(len(df)):
+        rsv_val = rsv.iloc[i]
+        if pd.isna(rsv_val):
+            k_vals[i] = np.nan
+            d_vals[i] = np.nan
+            j_vals[i] = np.nan
+            continue
+
+        k_curr = (m1 - 1) / m1 * k_prev + 1 / m1 * rsv_val
+        d_curr = (m2 - 1) / m2 * d_prev + 1 / m2 * k_curr
+        j_curr = 3 * k_curr - 2 * d_curr
+
+        k_vals[i] = k_curr
+        d_vals[i] = d_curr
+        j_vals[i] = j_curr
+
+        k_prev = k_curr
+        d_prev = d_curr
+
+    result["k"] = k_vals
+    result["d"] = d_vals
+    result["j"] = j_vals
 
     return result
 

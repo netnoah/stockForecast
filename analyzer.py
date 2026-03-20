@@ -225,11 +225,14 @@ def score_ma(df: pd.DataFrame) -> tuple[int, str]:
 
 
 def score_macd(df: pd.DataFrame) -> tuple[int, str]:
-    """Score based on MACD momentum and histogram trend.
+    """Score based on MACD momentum (DIF trend) and histogram position.
 
     Continuous scoring:
-    - Momentum: (DIF - DEA) / close, scaled to [-15, +15]
-    - Histogram trend: change rate of histogram, scaled to [-5, +5]
+    - Momentum: DIF rate of change (DIF today vs yesterday), scaled to [-15, +15].
+      This captures whether DIF is accelerating or decelerating, correctly
+      detecting trend improvement even when DIF/DEA are both negative (underwater).
+    - Histogram position: (DIF - DEA) normalized by close, scaled to [-5, +5].
+      Positive when DIF is above DEA (bullish), negative when below (bearish).
 
     Note: The MACD histogram column in indicators.py is named "macd".
 
@@ -243,29 +246,23 @@ def score_macd(df: pd.DataFrame) -> tuple[int, str]:
     latest = df.iloc[-1]
 
     prev_dif = _safe(prev.get("dif"))
-    prev_dea = _safe(prev.get("dea"))
-    prev_hist = _safe(prev.get("macd"))
     last_dif = _safe(latest.get("dif"))
     last_dea = _safe(latest.get("dea"))
-    last_hist = _safe(latest.get("macd"))
     close = _safe(latest.get("close"))
 
-    if any(v is None for v in (prev_dif, prev_dea, prev_hist, last_dif, last_dea, last_hist, close)):
+    if any(v is None for v in (prev_dif, last_dif, last_dea, close)):
         return (0, "MACD数据不完整 (NaN)")
 
-    # Momentum: DIF vs DEA normalized by close price
-    momentum = (last_dif - last_dea) / close * 2000
-    momentum = max(-15, min(15, momentum))
+    # Momentum: DIF's rate of change — true directional momentum
+    dif_momentum = (last_dif - prev_dif) / close * 2000
+    dif_momentum = max(-15, min(15, dif_momentum))
 
-    # Histogram trend: rate of change
-    if abs(prev_hist) > 1e-10:
-        hist_trend = (last_hist - prev_hist) / abs(prev_hist) * 5
-    else:
-        hist_trend = 0
-    hist_trend = max(-5, min(5, hist_trend))
+    # Histogram position: DIF vs DEA distance — current bullish/bearish state
+    hist_value = (last_dif - last_dea) / close * 2000
+    hist_position = max(-5, min(5, hist_value))
 
-    total = momentum + hist_trend
-    reason = f"动量={momentum:+.1f}; 柱状图趋势={hist_trend:+.1f}"
+    total = dif_momentum + hist_position
+    reason = f"DIF动量={dif_momentum:+.1f}; 柱状图位置={hist_position:+.1f}"
     return (_clamp(total), reason)
 
 

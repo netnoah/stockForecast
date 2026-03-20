@@ -15,7 +15,7 @@ def _ensure_file() -> None:
     os.makedirs(os.path.dirname(_PREDICTIONS_FILE), exist_ok=True)
 
     if not os.path.exists(_PREDICTIONS_FILE):
-        with open(_PREDICTIONS_FILE, 'w', newline='', encoding='utf-8') as f:
+        with open(_PREDICTIONS_FILE, 'w', newline='', encoding='utf-8-sig') as f:
             writer = csv.DictWriter(f, fieldnames=_FIELDS)
             writer.writeheader()
 
@@ -24,7 +24,7 @@ def _write_predictions(predictions: list[dict]) -> None:
     """Write all predictions to CSV, sorted by date descending."""
     _ensure_file()
     sorted_preds = sorted(predictions, key=lambda p: p["date"], reverse=True)
-    with open(_PREDICTIONS_FILE, 'w', newline='', encoding='utf-8') as f:
+    with open(_PREDICTIONS_FILE, 'w', newline='', encoding='utf-8-sig') as f:
         writer = csv.DictWriter(f, fieldnames=_FIELDS)
         writer.writeheader()
         writer.writerows(sorted_preds)
@@ -87,7 +87,16 @@ def read_predictions() -> list[dict]:
     if not os.path.exists(_PREDICTIONS_FILE):
         return []
 
-    with open(_PREDICTIONS_FILE, 'r', encoding='utf-8') as f:
+    for enc in ('utf-8-sig', 'utf-8', 'gbk', 'gb18030'):
+        try:
+            with open(_PREDICTIONS_FILE, 'r', newline='', encoding=enc) as f:
+                reader = csv.DictReader(f)
+                predictions = list(reader)
+            break
+        except (UnicodeDecodeError, UnicodeError):
+            continue
+    else:
+        predictions = []
         reader = csv.DictReader(f)
         predictions = list(reader)
 
