@@ -16,35 +16,45 @@ def _ensure_file() -> None:
             writer.writeheader()
 
 
+def _write_predictions(predictions: list[dict]) -> None:
+    """Write all predictions to CSV, sorted by date descending."""
+    _ensure_file()
+    sorted_preds = sorted(predictions, key=lambda p: p["date"], reverse=True)
+    with open(_PREDICTIONS_FILE, 'w', newline='', encoding='utf-8') as f:
+        writer = csv.DictWriter(f, fieldnames=_FIELDS)
+        writer.writeheader()
+        writer.writerows(sorted_preds)
+
+
 def record_prediction(symbol: str, name: str, price: float, signal: str, score: int, prob: int) -> None:
     """
-    Write a new row to predictions.csv.
+    Write a prediction to predictions.csv.
 
-    Args:
-        symbol: Stock symbol (e.g., '002602')
-        name: Stock Chinese name (e.g., '世纪华通')
-        price: Prediction price
-        signal: Trading signal
-        score: Analysis score (0-100)
-        prob: Predicted upward probability (0-100)
+    Deduplicates: same day + same stock keeps only the latest prediction.
+    File is sorted by date descending (newest first).
     """
     _ensure_file()
 
     today = datetime.now().strftime("%Y-%m-%d")
+    new_row = {
+        "date": today,
+        "symbol": symbol,
+        "name": name,
+        "price": f"{price:.2f}",
+        "signal": signal,
+        "score": score,
+        "pred_up_prob": prob,
+        "actual_change": "",
+        "hit": "",
+    }
 
-    with open(_PREDICTIONS_FILE, 'a', newline='', encoding='utf-8') as f:
-        writer = csv.DictWriter(f, fieldnames=_FIELDS)
-        writer.writerow({
-            "date": today,
-            "symbol": symbol,
-            "name": name,
-            "price": f"{price:.2f}",
-            "signal": signal,
-            "score": score,
-            "pred_up_prob": prob,
-            "actual_change": "",
-            "hit": ""
-        })
+    predictions = read_predictions()
+
+    # Remove existing rows for same day + same stock
+    predictions = [p for p in predictions if not (p["date"] == today and p["symbol"] == symbol)]
+
+    predictions.append(new_row)
+    _write_predictions(predictions)
 
 
 def _migrate_predictions(predictions: list[dict], fetch_name_fn) -> list[dict]:
@@ -56,10 +66,7 @@ def _migrate_predictions(predictions: list[dict], fetch_name_fn) -> list[dict]:
             pred["name"] = get_stock_name(pred["symbol"])
             changed = True
     if changed:
-        with open(_PREDICTIONS_FILE, 'w', newline='', encoding='utf-8') as f:
-            writer = csv.DictWriter(f, fieldnames=_FIELDS)
-            writer.writeheader()
-            writer.writerows(predictions)
+        _write_predictions(predictions)
     return predictions
 
 
@@ -67,6 +74,7 @@ def read_predictions() -> list[dict]:
     """
     Read all rows from predictions.csv as list of dicts.
 
+    Deduplicates same-day same-stock entries, keeping the last one.
     Returns:
         List of prediction dictionaries. Empty list if file is empty.
     """
@@ -79,7 +87,24 @@ def read_predictions() -> list[dict]:
         reader = csv.DictReader(f)
         predictions = list(reader)
 
-    return _migrate_predictions(predictions, None)
+    predictions = _migrate_predictions(predictions, None)
+
+    # Deduplicate: same day + same stock, keep last occurrence
+    seen = set()
+    deduped = []
+    for p in reversed(predictions):
+        key = (p["date"], p["symbol"])
+        if key in seen:
+            continue
+        seen.add(key)
+        deduped.append(p)
+    deduped.reverse()
+
+    if len(deduped) != len(predictions):
+        _write_predictions(deduped)
+        return deduped
+
+    return deduped
 
 
 def backfill_predictions(fetch_actual_fn) -> int:
@@ -130,10 +155,7 @@ def backfill_predictions(fetch_actual_fn) -> int:
 
     # Only rewrite file if changes were made
     if changes_made:
-        with open(_PREDICTIONS_FILE, 'w', newline='', encoding='utf-8') as f:
-            writer = csv.DictWriter(f, fieldnames=_FIELDS)
-            writer.writeheader()
-            writer.writerows(predictions)
+        _write_predictions(predictions)
 
     return backfill_count
 

@@ -1,7 +1,7 @@
 {
   "stocks": ["002602", "600519", "000001"],
   "indicators": {
-    "ma": { "enabled": true, "weight": 15 },
+    "ma": { "enabled": true, "weight": 25 },
     "macd": { "enabled": true, "weight": 20 },
     "rsi": { "enabled": true, "weight": 15 },
     "bollinger": { "enabled": true, "weight": 15 },
@@ -10,7 +10,7 @@
   },
   "market_modifier": {
     "enabled": true,
-    "max_impact": 15,
+    "max_impact": 8,
     "indices": ["sh000001", "sz399001", "sz399006", "sh000905"]
   }
 }
