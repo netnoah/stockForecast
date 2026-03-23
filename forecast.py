@@ -29,14 +29,16 @@ from wecom import push_reports
 def is_trading_hours() -> bool:
     """Check if current time is within or after an A-share trading session on a trading day.
 
-    Returns True from 9:30 (morning open) through 15:00 (afternoon close) on weekdays,
-    so that post-morning-session analysis (11:30-13:00) still fetches realtime data.
+    Returns True from 9:30 through 17:00 on weekdays.  The extended window
+    (15:00–17:00) ensures that post-close analysis still fetches the day's
+    closing price via the realtime quote API (Sina returns the final close
+    after 15:00).
     """
     now = datetime.now()
     if now.weekday() >= 5:
         return False
     hour_min = now.hour + now.minute / 60
-    return 9.5 <= hour_min <= 15.0
+    return 9.5 <= hour_min <= 17.0
 
 
 def _session_label() -> str:
@@ -49,6 +51,8 @@ def _session_label() -> str:
         return "午间休市 (上午收盘数据)"
     if 13.0 <= hour_min <= 15.0:
         return "盘中实时分析"
+    if 15.0 < hour_min <= 17.0:
+        return "盘后分析 (今日收盘数据)"
     return "盘后分析"
 
 
@@ -113,7 +117,7 @@ def analyze_stock(symbol: str, config: dict, refresh: bool = False):
 
     df = calc_all_indicators(df)
     raw_score, ind_results = calculate_stock_score(df, config)
-    modifier, market_results = calculate_market_modifier(config)
+    modifier, market_results = calculate_market_modifier(config, intraday=intraday)
     final_score = max(-100, min(100, int(raw_score + modifier)))
     signal = score_to_signal(final_score)
     key_levels = calculate_key_levels(df)

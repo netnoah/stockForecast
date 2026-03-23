@@ -417,6 +417,41 @@ def get_stock_name(symbol: str) -> str:
         return symbol
 
 
+def get_index_realtime_quote(index_code: str) -> dict | None:
+    """Get real-time quote for a market index using its full code.
+
+    Unlike get_realtime_quote (which expects bare stock codes and adds an
+    exchange prefix), this function accepts already-prefixed codes such as
+    'sz399006' or 'sh000001'.
+
+    Args:
+        index_code: Full index code with exchange prefix (e.g. 'sz399006').
+
+    Returns:
+        Dict with keys: open, high, low, close, volume.
+        Returns None if the quote cannot be retrieved.
+    """
+    url = _SINA_REALTIME_URL.format(full_code=index_code)
+    try:
+        resp = requests.get(url, headers=_SINA_HEADERS, timeout=10)
+        resp.raise_for_status()
+        parts = resp.text.split('"')
+        if len(parts) < 2:
+            return None
+        fields = parts[1].split(",")
+        if len(fields) < 6 or float(fields[3]) <= 0:
+            return None
+        return {
+            "open": float(fields[1]),
+            "high": float(fields[4]),
+            "low": float(fields[5]),
+            "close": float(fields[3]),
+            "volume": float(fields[8]) if len(fields) > 8 else 0,
+        }
+    except Exception:
+        return None
+
+
 def get_index_history(index_code: str, refresh: bool = False) -> pd.DataFrame:
     """Get historical daily OHLCV data for a market index.
 

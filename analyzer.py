@@ -15,7 +15,7 @@ from datetime import datetime
 
 import pandas as pd
 
-from data_source import get_index_history
+from data_source import get_index_history, get_index_realtime_quote
 from indicators import calc_ma, calc_macd
 
 
@@ -598,15 +598,20 @@ def classify_index_trend(df: pd.DataFrame) -> tuple[str, float]:
     return (_TRENT_NEUTRAL, strength)
 
 
-def calculate_market_modifier(config: dict) -> tuple[int, list[dict]]:
+def calculate_market_modifier(config: dict, intraday: bool = False) -> tuple[int, list[dict]]:
     """Calculate a market-wide modifier based on broad index trends.
 
     Each index is classified with a strength score in [-1, +1].
     The modifier is the weighted average of all index strengths, scaled
     to [-max_impact, +max_impact].
 
+    When *intraday* is True, real-time index quotes are fetched and
+    appended so that the modifier reflects the current session rather
+    than the previous close.
+
     Args:
         config: Parsed config.json dictionary.
+        intraday: Whether the analysis is running during trading hours.
 
     Returns:
         (modifier, results) where:
@@ -625,9 +630,48 @@ def calculate_market_modifier(config: dict) -> tuple[int, list[dict]]:
     for code in index_codes:
         try:
             index_df = get_index_history(code)
+            if intraday:
+                rt = get_index_realtime_quote(code)
+                if rt and rt.get("close") is not None:
+                    today_str = datetime.now().strftime("%Y-%m-%d")
+                    last_date = str(index_df.iloc[-1]["date"])[:10]
+                    if last_date != today_str:
+                        new_row = {
+                            "date": today_str,
+                            "open": rt["open"],
+                            "high": rt["high"],
+                            "low": rt["low"],
+                            "close": rt["close"],
+                            "volume": rt.get("volume", 0),
+                        }
+                        index_df = pd.concat(
+                            [index_df, pd.DataFrame([new_row])],
+                            ignore_index=True,
+                        )
             index_df = calc_ma(index_df)
             index_df = calc_macd(index_df)
             trend, strength = classify_index_trend(index_df)
+
+            # Intraday momentum override — MACD is a lagging indicator and
+            # can remain positive for several bars after a sudden drop.
+            # When the intraday change exceeds 1 %, blend in a direct
+            # momentum signal so the modifier reacts in real time.
+            if intraday and len(index_df) >= 2:
+                prev_close = _safe(index_df.iloc[-2].get("close"))
+                curr_close = _safe(index_df.iloc[-1].get("close"))
+                if prev_close is not None and curr_close is not None and prev_close > 0:
+                    day_change = (curr_close - prev_close) / prev_close
+                    if abs(day_change) > 0.01:
+                        momentum = max(-1.0, min(1.0, day_change * 15))
+                        weight = min(0.2 + abs(day_change) * 15, 0.6)
+                        strength = max(-1.0, min(1.0, strength * (1 - weight) + momentum * weight))
+                        if strength > 0.15:
+                            trend = _TRENT_BULLISH
+                        elif strength < -0.15:
+                            trend = _TRENT_BEARISH
+                        else:
+                            trend = _TRENT_NEUTRAL
+
             name = INDEX_NAMES.get(code, code)
             results.append({"code": code, "name": name, "trend": trend, "strength": strength})
         except Exception:
