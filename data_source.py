@@ -483,7 +483,7 @@ def _fetch_hk_realtime_via_sina(symbol: str) -> dict | None:
             "low": float(fields[5]),
             "close": float(fields[6]),
             "prev_close": float(fields[3]),
-            "volume": float(fields[11]),
+            "volume": float(fields[12]),  # Field 12 = shares; field 11 = amount (HKD)
             "name": fields[1],
         }
     except Exception as exc:
@@ -494,6 +494,30 @@ def _fetch_hk_realtime_via_sina(symbol: str) -> dict | None:
 # ---------------------------------------------------------------------------
 # Public API
 # ---------------------------------------------------------------------------
+
+
+def _cache_is_stale(latest_date: pd.Timestamp) -> bool:
+    """Check if cached data is stale and needs refresh.
+
+    Returns True when the market has closed for a new trading day but the
+    cache doesn't contain that day's data yet.
+    """
+    now = datetime.now()
+    today = now.replace(hour=0, minute=0, second=0, microsecond=0)
+
+    if latest_date >= pd.Timestamp(today):
+        return False  # Cache already has today's data
+
+    # Cache is from a previous day — check if a new trading day has closed
+    if now.weekday() < 5 and now.hour >= 15:
+        return True  # Weekday past 15:00, market closed
+    if now.weekday() < 5 and now.hour < 9:
+        return True  # Weekday before open, yesterday's close is available
+    if now.weekday() == 5:
+        # Saturday: Friday's close should be available
+        if latest_date < pd.Timestamp(today - timedelta(days=1)):
+            return True
+    return False
 
 
 def _stock_cache_path(symbol: str) -> str:
@@ -549,9 +573,10 @@ def get_stock_history(symbol: str, refresh: bool = False) -> pd.DataFrame:
         cached = _read_cache(cache_filepath)
         if cached is not None and not cached.empty:
             latest_date = pd.to_datetime(cached["date"]).max()
-            three_days_ago = datetime.now() - timedelta(days=3)
-            if latest_date >= pd.Timestamp(three_days_ago):
-                return cached.copy()
+            if not _cache_is_stale(latest_date):
+                three_days_ago = datetime.now() - timedelta(days=3)
+                if latest_date >= pd.Timestamp(three_days_ago):
+                    return cached.copy()
             # Incremental update
             try:
                 incremental = _fetch_incremental(full_code, latest_date.strftime("%Y-%m-%d"))
@@ -709,9 +734,10 @@ def get_index_history(index_code: str, refresh: bool = False) -> pd.DataFrame:
         cached = _read_cache(cache_filepath)
         if cached is not None and not cached.empty:
             latest_date = pd.to_datetime(cached["date"]).max()
-            three_days_ago = datetime.now() - timedelta(days=3)
-            if latest_date >= pd.Timestamp(three_days_ago):
-                return cached.copy()
+            if not _cache_is_stale(latest_date):
+                three_days_ago = datetime.now() - timedelta(days=3)
+                if latest_date >= pd.Timestamp(three_days_ago):
+                    return cached.copy()
             # Incremental update
             try:
                 incremental = _fetch_incremental(index_code, latest_date.strftime("%Y-%m-%d"))

@@ -5,7 +5,7 @@ from datetime import datetime
 
 import pandas as pd
 
-from data_source import get_stock_history, get_realtime_quote, get_stock_name
+from data_source import get_stock_history, get_realtime_quote, get_stock_name, _stock_cache_path, _save_cache
 from indicators import calc_all_indicators
 from analyzer import (
     load_config,
@@ -30,16 +30,15 @@ from wecom import push_reports
 def is_trading_hours() -> bool:
     """Check if current time is within or after an A-share trading session on a trading day.
 
-    Returns True from 9:30 through 17:00 on weekdays.  The extended window
-    (15:00–17:00) ensures that post-close analysis still fetches the day's
-    closing price via the realtime quote API (Sina returns the final close
-    after 15:00).
+    Returns True from 9:30 through the end of the day on weekdays.  This covers
+    intraday, post-close, and evening analysis — the realtime quote APIs
+    (Sina/Tencent) remain available well after market close.
     """
     now = datetime.now()
     if now.weekday() >= 5:
         return False
     hour_min = now.hour + now.minute / 60
-    return 9.5 <= hour_min <= 17.0
+    return hour_min >= 9.5
 
 
 def _session_label() -> str:
@@ -58,15 +57,36 @@ def _session_label() -> str:
 
 
 def fetch_actual_closes(symbol: str, pred_date: str, max_days: int = 14) -> tuple[float | None, list[float | None]]:
-    """Fetch base close and subsequent closes for backfill using unadjusted prices.
+    """Fetch base close and subsequent closes for backfill.
 
-    Uses unadjusted (raw) close prices so that the calculated change matches
-    the actual market movement, not distorted by qfq adjustment factor changes.
+    Priority: cached data (via get_stock_history) -> raw API fetch.
+    qfq-adjusted prices preserve percentage changes within the same series,
+    so they are safe for actual_change calculation.
 
     Returns (base_close, closes) where base_close is the close on pred_date,
     and closes is a list of length max_days with close prices for subsequent
     trading days (None if unavailable).
     """
+    # 1. Try cached data first (qfq, but percentage changes are preserved)
+    try:
+        df = get_stock_history(symbol)
+        if df is not None and not df.empty:
+            match = df[df["date"].astype(str).str[:10] == pred_date]
+            if len(match) > 0:
+                idx = match.index[0]
+                base_close = float(df.iloc[idx]["close"])
+                closes = []
+                for i in range(1, max_days + 1):
+                    if idx + i < len(df):
+                        closes.append(float(df.iloc[idx + i]["close"]))
+                    else:
+                        closes.append(None)
+                if any(c is not None for c in closes):
+                    return (base_close, closes)
+    except Exception:
+        pass
+
+    # 2. Fallback to raw API (existing logic)
     try:
         from data_source import _fetch_via_akshare, _fetch_via_sina, _dedup_and_sort, _is_hk_stock
         from data_source import _hk_code, _exchange_prefix
@@ -152,6 +172,7 @@ def analyze_stock(symbol: str, config: dict, refresh: bool = False):
                     "volume": realtime_data["volume"],
                 }
                 df = pd.concat([df, pd.DataFrame([new_row])], ignore_index=True)
+                _save_cache(df, _stock_cache_path(symbol))
 
     df = calc_all_indicators(df)
     raw_score, ind_results, trend_status = calculate_stock_score(df, config)
@@ -196,10 +217,9 @@ def main():
 
     config = load_config()
 
-    # Backfill existing predictions before new analysis
-    backfill_predictions(fetch_actual_closes)
-
     if args.review:
+        # Backfill first so review reflects latest data
+        backfill_predictions(fetch_actual_closes)
         stats = calculate_accuracy()
         print(format_accuracy_report(stats))
         return
@@ -256,6 +276,9 @@ def main():
         summary_text = "\n".join(summary_lines)
         print(summary_text)
         push_sections.append(summary_text)
+
+    # Backfill existing predictions after analysis (cache is now fresh)
+    backfill_predictions(fetch_actual_closes)
 
     # Show accuracy stats after all analyses
     stats = calculate_accuracy()
