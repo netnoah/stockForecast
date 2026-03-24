@@ -28,6 +28,7 @@ pip install -r requirements.txt
 
 ```
 forecast.py          # CLI entry point, orchestration
+├── logger.py        # File-only logging setup, daily log files in data/logs/
 ├── data_source.py   # Data fetching: akshare → Sina API fallback, CSV cache in data/history/
 ├── indicators.py    # Technical indicator calculations (MA, MACD, RSI, KDJ, Bollinger, Volume)
 ├── analyzer.py      # Scoring engine, signal generation, report formatting
@@ -44,6 +45,7 @@ forecast.py          # CLI entry point, orchestration
 - **Signals:** ≥50 强烈买入, 15-49 买入, -14~14 观望, -49~-15 卖出, ≤-50 强烈卖出
 - **Trading hours mode:** Weekdays 9:30-15:00 triggers intraday real-time data merge
 - **Cache:** Historical data cached as CSV in `data/history/{code}.csv`, refreshed when stale (>3 days)
+- **Logging:** File-only logging to `data/logs/YYYY-MM-DD.log`, auto-cleanup after 3 days, no console output
 - **Stock format:** exchange prefix + code (`sz002602`, `sh600000`, `hk2400`, `sh000001` for indices)
 - **A-share color convention:** Red = bullish (涨), Green = bearish (跌) — opposite of Western markets
 

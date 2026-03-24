@@ -302,10 +302,13 @@ def _fetch_history(full_code: str) -> pd.DataFrame:
 
     df = _fetch_via_akshare(full_code)
     if df is not None and not df.empty:
+        _logger.info("Fetched %s via akshare (%d rows)", full_code, len(df))
         return df
 
+    _logger.warning("akshare failed for %s, trying Sina fallback", full_code)
     df = _fetch_via_sina(full_code)
     if df is not None and not df.empty:
+        _logger.info("Fetched %s via Sina fallback (%d rows)", full_code, len(df))
         return df
 
     raise RuntimeError(f"Failed to fetch data for {full_code} from all sources")
@@ -576,6 +579,7 @@ def get_stock_history(symbol: str, refresh: bool = False) -> pd.DataFrame:
             if not _cache_is_stale(latest_date):
                 three_days_ago = datetime.now() - timedelta(days=3)
                 if latest_date >= pd.Timestamp(three_days_ago):
+                    _logger.info("Cache hit for %s (%d rows, latest=%s)", symbol, len(cached), latest_date.strftime("%Y-%m-%d"))
                     return cached.copy()
             # Incremental update
             try:
@@ -584,12 +588,14 @@ def get_stock_history(symbol: str, refresh: bool = False) -> pd.DataFrame:
                     merged = pd.concat([cached, incremental], ignore_index=True)
                     merged = _dedup_and_sort(merged)
                     _save_cache(merged, cache_filepath)
+                    _logger.info("Incremental update for %s: +%d rows (total %d)", symbol, len(incremental), len(merged))
                     return merged.copy()
             except Exception:
                 # If incremental fails, fall through to full fetch
                 pass
 
     # Full fetch
+    _logger.info("Full fetch for %s (refresh=%s)", symbol, refresh)
     df = _fetch_history(full_code)
     df = _dedup_and_sort(df)
     _save_cache(df, cache_filepath)
@@ -613,6 +619,7 @@ def get_realtime_quote(symbol: str) -> dict | None:
         return _fetch_hk_realtime_via_sina(symbol)
 
     # A-share: try Tencent first, then Sina, respecting circuit breakers
+    _logger.debug("Fetching realtime quote for %s", symbol)
     if not _is_circuit_open("tencent_realtime"):
         _logger.debug("Trying Tencent realtime for %s", symbol)
         quote = _fetch_realtime_via_tencent(symbol)
@@ -627,6 +634,7 @@ def get_realtime_quote(symbol: str) -> dict | None:
             return quote
         _logger.info("Sina failed for %s", symbol)
 
+    _logger.warning("All realtime sources failed for %s", symbol)
     return None
 
 

@@ -1,10 +1,12 @@
 import argparse
+import logging
 import re
 import sys
 from datetime import datetime
 
 import pandas as pd
 
+from logger import setup_logging
 from data_source import get_stock_history, get_realtime_quote, get_stock_name, _stock_cache_path, _save_cache
 from indicators import calc_all_indicators
 from analyzer import (
@@ -25,6 +27,8 @@ from tracker import (
     format_accuracy_report,
 )
 from wecom import push_reports
+
+logger = logging.getLogger(__name__)
 
 
 def is_trading_hours() -> bool:
@@ -145,10 +149,12 @@ def analyze_stock(symbol: str, config: dict, refresh: bool = False):
     try:
         df = get_stock_history(symbol, refresh=refresh)
     except RuntimeError as e:
+        logger.error("Data fetch failed for %s: %s", symbol, e)
         print(f"  [错误] {e}")
         return None
 
     if df is None or len(df) < 30:
+        logger.warning("Insufficient data for %s: %d rows", symbol, len(df) if df is not None else 0)
         print(f"  [错误] {symbol} 数据不足 ({len(df) if df is not None else 0} 行)")
         return None
 
@@ -204,10 +210,14 @@ def analyze_stock(symbol: str, config: dict, refresh: bool = False):
 
     record_prediction(symbol, stock_name, float(df.iloc[-1]["close"]), signal, final_score, final_score)
 
+    logger.info("Analysis complete: %s(%s) score=%d signal=%s", stock_name, symbol, final_score, signal)
+
     return report, signal, final_score
 
 
 def main():
+    setup_logging()
+
     parser = argparse.ArgumentParser(description="A股量化分析工具")
     parser.add_argument("symbols", nargs="*", help="股票代码 (如 002602)")
     parser.add_argument("-l", "--list", action="store_true", help="读取 config.json 中的 stock_list 配置")
@@ -219,6 +229,7 @@ def main():
 
     if args.review:
         # Backfill first so review reflects latest data
+        logger.info("Running in review mode")
         backfill_predictions(fetch_actual_closes)
         stats = calculate_accuracy()
         print(format_accuracy_report(stats))
@@ -233,6 +244,8 @@ def main():
     if not symbols:
         print("未指定股票代码，请使用参数或在 config.json 中配置 stocks")
         sys.exit(1)
+
+    logger.info("Program started: mode=analyze stocks=%s refresh=%s", symbols, args.refresh)
 
     multiple = len(symbols) > 1
     reports = []
@@ -278,6 +291,7 @@ def main():
         push_sections.append(summary_text)
 
     # Backfill existing predictions after analysis (cache is now fresh)
+    logger.info("Running backfill for %d analyzed stocks", len(reports))
     backfill_predictions(fetch_actual_closes)
 
     # Show accuracy stats after all analyses

@@ -6,6 +6,7 @@ group robot via webhook. Supports markdown and plain text message formats.
 
 from __future__ import annotations
 
+import logging
 import re
 from datetime import datetime
 
@@ -16,6 +17,8 @@ _ANSI_RE = re.compile(r"\033\[[0-9;]*m")
 
 # WeChat Work markdown message size limit (bytes)
 _WECOM_MAX_SIZE = 4096
+
+logger = logging.getLogger(__name__)
 
 
 def strip_ansi(text: str) -> str:
@@ -126,6 +129,7 @@ def send_to_wecom(webhook_url: str, content: str, msg_format: str = "markdown") 
     # Check size limit
     content_bytes = content.encode("utf-8")
     if len(content_bytes) > _WECOM_MAX_SIZE:
+        logger.debug("Message truncated: %d bytes > %d limit", len(content_bytes), _WECOM_MAX_SIZE)
         content = content[:_WECOM_MAX_SIZE - 20].encode("utf-8", errors="ignore").decode("utf-8", errors="ignore")
         content += "\n\n[内容过长已截断]"
 
@@ -150,11 +154,14 @@ def send_to_wecom(webhook_url: str, content: str, msg_format: str = "markdown") 
         resp.raise_for_status()
         result = resp.json()
         if result.get("errcode", -1) != 0:
+            logger.error("WeChat push failed: errcode=%s errmsg=%s", result.get("errcode"), result.get("errmsg", "未知"))
             print(f"  [推送失败] 企业微信返回错误: {result.get('errmsg', '未知')}")
             return False
+        logger.info("WeChat push succeeded (format=%s, size=%d bytes)", msg_format, len(content_bytes))
         print("  [推送成功] 已发送到企业微信")
         return True
     except requests.RequestException as e:
+        logger.error("WeChat push network error: %s", e)
         print(f"  [推送失败] 网络请求异常: {e}")
         return False
 

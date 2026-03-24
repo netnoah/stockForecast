@@ -1,4 +1,5 @@
 import csv
+import logging
 import os
 from datetime import datetime
 
@@ -13,6 +14,8 @@ _DATA_VERSION = 3  # Bump to force re-fill all hit columns
 
 _PREDICTIONS_FILE = os.path.join(os.path.dirname(os.path.abspath(__file__)), "data", "predictions.csv")
 _FIELDS = ["date", "symbol", "name", "price", "signal", "score", "pred_up_prob", "hit"] + _HIT_DAY_COLUMNS
+
+logger = logging.getLogger(__name__)
 
 
 def _ensure_file() -> None:
@@ -80,6 +83,9 @@ def record_prediction(symbol: str, name: str, price: float, signal: str, score: 
     predictions.append(new_row)
     _write_predictions(predictions)
 
+    logger.info("Prediction recorded: %s(%s) signal=%s score=%d price=%.2f",
+                name, symbol, signal, score, price)
+
 
 def _migrate_predictions(predictions: list[dict], fetch_name_fn) -> list[dict]:
     """Backfill missing 'name' field for old predictions and re-save."""
@@ -90,6 +96,7 @@ def _migrate_predictions(predictions: list[dict], fetch_name_fn) -> list[dict]:
             pred["name"] = get_stock_name(pred["symbol"])
             changed = True
     if changed:
+        logger.info("Migration: backfilled 'name' field for predictions")
         _write_predictions(predictions)
     return predictions
 
@@ -251,6 +258,8 @@ def backfill_predictions(fetch_actual_fn) -> int:
 
     # Always rewrite to keep summary row up-to-date
     _write_predictions(predictions)
+
+    logger.info("Backfill complete: %d records backfilled out of %d total", backfill_count, len(predictions))
 
     return backfill_count
 
@@ -450,6 +459,12 @@ def calculate_accuracy() -> dict:
                 "hits": day_hits,
                 "accuracy": (day_hits / day_total) * 100,
             }
+
+    logger.info("Accuracy calculated: total=%d verified=%d overall=%.1f%% profit=%.2f%% loss=%.2f%% pl_ratio=%s",
+                 total, verified_count, overall if verified_count > 0 else 0,
+                 avg_profit if avg_profit is not None else 0,
+                 avg_loss if avg_loss is not None else 0,
+                 f"{profit_loss_ratio:.2f}" if profit_loss_ratio is not None and profit_loss_ratio != float("inf") else "inf")
 
     return {
         "total": total,

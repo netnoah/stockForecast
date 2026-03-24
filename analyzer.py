@@ -9,6 +9,7 @@ then combined using configurable weights from config.json.
 """
 
 import json
+import logging
 import math
 import os
 from datetime import datetime
@@ -17,6 +18,8 @@ import pandas as pd
 
 from data_source import get_index_history, get_index_realtime_quote
 from indicators import calc_ma, calc_macd
+
+logger = logging.getLogger(__name__)
 
 
 # ---------------------------------------------------------------------------
@@ -713,6 +716,10 @@ def calculate_stock_score(df: pd.DataFrame, config: dict) -> tuple[int, list[dic
 
     trend_status, _ = _classify_trend(df)
 
+    logger.info("Composite score: raw=%d trend=%s indicators=%s",
+                int(raw_score), trend_status,
+                ", ".join(f"{r['name']}={r['score']}" for r in results))
+
     return (int(raw_score), results, trend_status)
 
 
@@ -850,6 +857,7 @@ def calculate_market_modifier(config: dict, intraday: bool = False) -> tuple[int
             name = INDEX_NAMES.get(code, code)
             results.append({"code": code, "name": name, "trend": trend, "strength": strength})
         except Exception:
+            logger.warning("Failed to fetch/calculate index trend for %s, defaulting to neutral", code)
             results.append({"code": code, "name": INDEX_NAMES.get(code, code), "trend": _TRENT_NEUTRAL, "strength": 0.0})
 
     # Weighted average of strengths
@@ -858,6 +866,9 @@ def calculate_market_modifier(config: dict, intraday: bool = False) -> tuple[int
 
     modifier = int(avg_strength * max_impact)
     modifier = max(-max_impact, min(max_impact, modifier))
+
+    logger.info("Market modifier: %d (indices: %s)", modifier,
+                ", ".join(f"{r['name']}={r['trend']}({r['strength']:+.2f})" for r in results))
 
     return (modifier, results)
 
