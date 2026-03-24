@@ -13,7 +13,7 @@ _SUMMARY_MARKER = "===命中率==="
 _DATA_VERSION = 3  # Bump to force re-fill all hit columns
 
 _PREDICTIONS_FILE = os.path.join(os.path.dirname(os.path.abspath(__file__)), "data", "predictions.csv")
-_FIELDS = ["date", "symbol", "name", "price", "signal", "score", "pred_up_prob", "hit"] + _HIT_DAY_COLUMNS
+_FIELDS = ["date", "symbol", "name", "price", "signal", "score", "hit"] + _HIT_DAY_COLUMNS
 
 logger = logging.getLogger(__name__)
 
@@ -52,7 +52,7 @@ def _write_predictions(predictions: list[dict]) -> None:
         writer.writerow(summary_row)
 
 
-def record_prediction(symbol: str, name: str, price: float, signal: str, score: int, prob: int) -> None:
+def record_prediction(symbol: str, name: str, price: float, signal: str, score: int) -> None:
     """
     Write a prediction to predictions.csv.
 
@@ -69,7 +69,6 @@ def record_prediction(symbol: str, name: str, price: float, signal: str, score: 
         "price": f"{price:.2f}",
         "signal": signal,
         "score": score,
-        "pred_up_prob": prob,
         "hit": "",
     }
     for col in _HIT_DAY_COLUMNS:

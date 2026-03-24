@@ -208,7 +208,7 @@ def analyze_stock(symbol: str, config: dict, refresh: bool = False):
         trend_status=trend_status,
     )
 
-    record_prediction(symbol, stock_name, float(df.iloc[-1]["close"]), signal, final_score, final_score)
+    record_prediction(symbol, stock_name, float(df.iloc[-1]["close"]), signal, final_score)
 
     logger.info("Analysis complete: %s(%s) score=%d signal=%s", stock_name, symbol, final_score, signal)
 
