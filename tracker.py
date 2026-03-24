@@ -6,8 +6,12 @@ from datetime import datetime
 # 来回成本约 0.15%, 涨跌超过此阈值才算有效 hit
 _ROUND_TRIP_COST = 0.0015  # 0.15%
 
+_MAX_TRACK_DAYS = 14
+_HIT_DAY_COLUMNS = [f"hit{d}" for d in range(2, _MAX_TRACK_DAYS + 1)]
+_SUMMARY_MARKER = "===命中率==="
+
 _PREDICTIONS_FILE = os.path.join(os.path.dirname(os.path.abspath(__file__)), "data", "predictions.csv")
-_FIELDS = ["date", "symbol", "name", "price", "signal", "score", "pred_up_prob", "actual_change", "hit"]
+_FIELDS = ["date", "symbol", "name", "price", "signal", "score", "pred_up_prob", "actual_change", "hit"] + _HIT_DAY_COLUMNS
 
 
 def _ensure_file() -> None:
@@ -21,13 +25,25 @@ def _ensure_file() -> None:
 
 
 def _write_predictions(predictions: list[dict]) -> None:
-    """Write all predictions to CSV, sorted by date descending."""
+    """Write all predictions to CSV, sorted by date descending, with accuracy summary row."""
     _ensure_file()
     sorted_preds = sorted(predictions, key=lambda p: p["date"], reverse=True)
+
+    # Build summary row: date=marker, hit columns show accuracy, rest empty
+    summary_row = {field: "" for field in _FIELDS}
+    summary_row["date"] = _SUMMARY_MARKER
+    all_hit_cols = ["hit"] + _HIT_DAY_COLUMNS
+    for col in all_hit_cols:
+        verified = [p for p in sorted_preds if p.get(col) and p[col].strip()]
+        if verified:
+            hits = sum(1 for p in verified if p[col] == "1")
+            summary_row[col] = f"{hits}/{len(verified)} ({hits / len(verified) * 100:.1f}%)"
+
     with open(_PREDICTIONS_FILE, 'w', newline='', encoding='utf-8-sig') as f:
         writer = csv.DictWriter(f, fieldnames=_FIELDS)
         writer.writeheader()
         writer.writerows(sorted_preds)
+        writer.writerow(summary_row)
 
 
 def record_prediction(symbol: str, name: str, price: float, signal: str, score: int, prob: int) -> None:
@@ -51,6 +67,8 @@ def record_prediction(symbol: str, name: str, price: float, signal: str, score: 
         "actual_change": "",
         "hit": "",
     }
+    for col in _HIT_DAY_COLUMNS:
+        new_row[col] = ""
 
     predictions = read_predictions()
 
@@ -69,6 +87,19 @@ def _migrate_predictions(predictions: list[dict], fetch_name_fn) -> list[dict]:
         if not pred.get("name") or not pred["name"].strip():
             pred["name"] = get_stock_name(pred["symbol"])
             changed = True
+    if changed:
+        _write_predictions(predictions)
+    return predictions
+
+
+def _migrate_hit_columns(predictions: list[dict]) -> list[dict]:
+    """Backfill missing hit2-hit14 columns for old CSV records."""
+    changed = False
+    for pred in predictions:
+        for col in _HIT_DAY_COLUMNS:
+            if col not in pred:
+                pred[col] = ""
+                changed = True
     if changed:
         _write_predictions(predictions)
     return predictions
@@ -100,7 +131,17 @@ def read_predictions() -> list[dict]:
         reader = csv.DictReader(f)
         predictions = list(reader)
 
+    # Filter out summary row before any processing
+    predictions = [p for p in predictions if p.get("date") != _SUMMARY_MARKER]
+
     predictions = _migrate_predictions(predictions, None)
+    predictions = _migrate_hit_columns(predictions)
+
+    # Normalize date format (2026/3/24 → 2026-03-24) for consistent dedup
+    for p in predictions:
+        if "/" in p["date"]:
+            parts = p["date"].split("/")
+            p["date"] = f"{parts[0]}-{int(parts[1]):02d}-{int(parts[2]):02d}"
 
     # Deduplicate: same day + same stock, keep last occurrence
     seen = set()
@@ -122,14 +163,16 @@ def read_predictions() -> list[dict]:
 
 def backfill_predictions(fetch_actual_fn) -> int:
     """
-    Backfill actual results for predictions where actual_change is empty.
+    Backfill actual results for predictions where actual_change is empty,
+    and fill hit2-hit14 for multi-day accuracy tracking.
 
     Args:
-        fetch_actual_fn: Function that takes (symbol, date) and returns
-                        the next-day close price as float, or None if unavailable.
+        fetch_actual_fn: Function that takes (symbol, pred_date, max_days) and returns
+                        a list of close prices (one per subsequent trading day), or
+                        None entries when data is unavailable. Length is max_days.
 
     Returns:
-        Count of records that were backfilled.
+        Count of records that were backfilled (at least day-1).
     """
     predictions = read_predictions()
 
@@ -140,35 +183,60 @@ def backfill_predictions(fetch_actual_fn) -> int:
     backfill_count = 0
 
     for pred in predictions:
-        # Skip if already has actual_change
-        if pred.get("actual_change") and pred.get("actual_change").strip():
-            continue
-
         symbol = pred["symbol"]
         pred_date = pred["date"]
         pred_price = float(pred["price"])
         signal = pred["signal"]
 
-        # Fetch next-day close price
-        next_close = fetch_actual_fn(symbol, pred_date)
+        # Determine which days still need filling
+        if pred.get("actual_change") and pred.get("actual_change").strip():
+            # Day-1 already filled — find last filled day for incremental update
+            last_filled = 1
+            for d in range(2, _MAX_TRACK_DAYS + 1):
+                col = f"hit{d}"
+                if pred.get(col) and pred[col].strip():
+                    last_filled = d
+                else:
+                    break
+            start_day = last_filled + 1
+        else:
+            start_day = 1
 
-        if next_close is not None:
-            # Calculate actual change
-            actual_change = (next_close - pred_price) / pred_price
+        if start_day > _MAX_TRACK_DAYS:
+            continue  # All 14 days already filled
 
-            # Determine hit
+        # Fetch close prices for needed days
+        max_days_needed = _MAX_TRACK_DAYS
+        closes = fetch_actual_fn(symbol, pred_date, max_days_needed)
+
+        if closes is None or len(closes) == 0:
+            continue
+
+        # Fill each day
+        pred_changed = False
+        for d in range(start_day, _MAX_TRACK_DAYS + 1):
+            day_idx = d - 1  # 0-based index into closes list
+            if day_idx >= len(closes) or closes[day_idx] is None:
+                break  # No more data available, stop
+
+            close_price = closes[day_idx]
+            actual_change = (close_price - pred_price) / pred_price
             hit = _calculate_hit(signal, actual_change)
 
-            # Update prediction
-            pred["actual_change"] = f"{actual_change * 100:+.2f}%"
-            pred["hit"] = "1" if hit else "0"
+            if d == 1:
+                pred["actual_change"] = f"{actual_change * 100:+.2f}%"
+                pred["hit"] = "1" if hit else "0"
+                backfill_count += 1
+            else:
+                pred[f"hit{d}"] = "1" if hit else "0"
 
+            pred_changed = True
+
+        if pred_changed:
             changes_made = True
-            backfill_count += 1
 
-    # Only rewrite file if changes were made
-    if changes_made:
-        _write_predictions(predictions)
+    # Always rewrite to keep summary row up-to-date
+    _write_predictions(predictions)
 
     return backfill_count
 
@@ -238,6 +306,7 @@ def calculate_accuracy() -> dict:
             "avg_loss": None,
             "profit_loss_ratio": None,
             "expectancy": None,
+            "by_day": {},
         }
 
     # Filter predictions with actual results
@@ -256,6 +325,7 @@ def calculate_accuracy() -> dict:
             "avg_loss": None,
             "profit_loss_ratio": None,
             "expectancy": None,
+            "by_day": {},
         }
 
     # Calculate overall accuracy
@@ -318,6 +388,20 @@ def calculate_accuracy() -> dict:
                 "accuracy": (signal_hits / signal_total) * 100,
             }
 
+    # Calculate by day (day 1 through day 14)
+    by_day = {}
+    for d in range(1, _MAX_TRACK_DAYS + 1):
+        col = "hit" if d == 1 else f"hit{d}"
+        day_verified = [p for p in verified if p.get(col) and p[col].strip()]
+        if day_verified:
+            day_hits = sum(1 for p in day_verified if p[col] == "1")
+            day_total = len(day_verified)
+            by_day[d] = {
+                "verified": day_total,
+                "hits": day_hits,
+                "accuracy": (day_hits / day_total) * 100,
+            }
+
     return {
         "total": total,
         "verified": verified_count,
@@ -327,6 +411,7 @@ def calculate_accuracy() -> dict:
         "avg_loss": avg_loss,
         "profit_loss_ratio": profit_loss_ratio,
         "expectancy": expectancy,
+        "by_day": by_day,
     }
 
 
@@ -384,5 +469,16 @@ def format_accuracy_report(stats: dict) -> str:
         signal_total = signal_stats['total']
         accuracy = signal_stats['accuracy']
         lines.append(f"  {signal} 准确率: {signal_hits}/{signal_total} ({accuracy:.1f}%)")
+
+    # Multi-day accuracy (only show days 1, 2, 5, 14)
+    by_day = stats.get("by_day", {})
+    if by_day:
+        lines.append("")
+        lines.append("多日命中率:")
+        display_days = [1, 2, 5, 14]
+        for d in display_days:
+            if d in by_day:
+                day = by_day[d]
+                lines.append(f"  第{d}日: {day['hits']}/{day['verified']} ({day['accuracy']:.1f}%)")
 
     return "\n".join(lines)

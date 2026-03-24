@@ -57,25 +57,29 @@ def _session_label() -> str:
     return "盘后分析"
 
 
-def fetch_actual_close(symbol: str, pred_date: str) -> float | None:
-    """Fetch actual closing price for the next trading day after pred_date (used by tracker backfill).
+def fetch_actual_closes(symbol: str, pred_date: str, max_days: int = 14) -> list[float | None]:
+    """Fetch closing prices for up to max_days trading days after pred_date (used by tracker backfill).
 
-    Only uses daily K-line data (refresh=True to bypass stale cache). Returns None
-    if the next trading day's close is not yet available, rather than falling back
-    to an intraday realtime price which would give inaccurate results.
+    Only uses daily K-line data (refresh=True to bypass stale cache). Returns a list
+    of length max_days, where each element is the close price for that trading day,
+    or None if unavailable.
     """
     try:
         df = get_stock_history(symbol, refresh=True)
         df["date_str"] = df["date"].astype(str).str[:10]
         match = df[df["date_str"] == pred_date]
         if len(match) == 0:
-            return None
+            return [None] * max_days
         idx = match.index[0]
-        if idx + 1 < len(df):
-            return float(df.iloc[idx + 1]["close"])
-        return None
+        closes = []
+        for i in range(1, max_days + 1):
+            if idx + i < len(df):
+                closes.append(float(df.iloc[idx + i]["close"]))
+            else:
+                closes.append(None)
+        return closes
     except Exception:
-        return None
+        return [None] * max_days
 
 
 def analyze_stock(symbol: str, config: dict, refresh: bool = False):
@@ -155,7 +159,7 @@ def main():
     config = load_config()
 
     # Backfill existing predictions before new analysis
-    backfill_predictions(fetch_actual_close)
+    backfill_predictions(fetch_actual_closes)
 
     if args.review:
         stats = calculate_accuracy()
