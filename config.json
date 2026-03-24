@@ -3,12 +3,13 @@
   "wecom_webhook": "https://qyapi.weixin.qq.com/cgi-bin/webhook/send?key=f9ababe2-1de4-4bef-a546-04433ff90315",
   "wecom_msg_format": "text",
   "indicators": {
-    "ma": { "enabled": true, "weight": 25 },
+    "ma": { "enabled": true, "weight": 20 },
     "macd": { "enabled": true, "weight": 20 },
-    "rsi": { "enabled": true, "weight": 15 },
+    "rsi": { "enabled": true, "weight": 10 },
     "bollinger": { "enabled": true, "weight": 15 },
+    "kdj": { "enabled": true, "weight": 10 },
     "volume": { "enabled": true, "weight": 15 },
-    "kdj": { "enabled": true, "weight": 10 }
+    "bias": { "enabled": true, "weight": 10 }
   },
   "market_modifier": {
     "enabled": true,

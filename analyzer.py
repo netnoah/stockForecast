@@ -98,6 +98,25 @@ _TRENT_LABELS = {
     _TRENT_NEUTRAL: "中性",
 }
 
+# 7-level stock trend classification (for individual stock scoring)
+_TREND_STRONG_BULL = "strong_bull"
+_TREND_BULL = "bull"
+_TREND_WEAK_BULL = "weak_bull"
+_TREND_CONSOLIDATION = "consolidation"
+_TREND_WEAK_BEAR = "weak_bear"
+_TREND_BEAR = "bear"
+_TREND_STRONG_BEAR = "strong_bear"
+
+_TREND_STOCK_LABELS = {
+    _TREND_STRONG_BULL: "强势多头",
+    _TREND_BULL: "多头",
+    _TREND_WEAK_BULL: "弱多头",
+    _TREND_CONSOLIDATION: "震荡",
+    _TREND_WEAK_BEAR: "弱空头",
+    _TREND_BEAR: "空头",
+    _TREND_STRONG_BEAR: "强势空头",
+}
+
 
 # ---------------------------------------------------------------------------
 # Config
@@ -135,6 +154,38 @@ def score_to_signal(score: int) -> str:
     return "观望"
 
 
+def calculate_signal(score: int, trend_status: str) -> str:
+    """Generate signal with trend filtering to reduce false signals.
+
+    Rules:
+    - Strong buy: score >= 50 AND trend in (strong_bull, bull)
+    - Buy: score >= 15 AND trend NOT in (bear, strong_bear)
+    - Sell: score <= -15 AND trend in (bear, strong_bear)
+    - Strong sell: score <= -50 AND trend in (bear, strong_bear)
+    - Otherwise: Hold (观望)
+
+    Args:
+        score: Integer score in [-100, 100].
+        trend_status: One of the _TREND_* constants.
+
+    Returns:
+        Signal label string.
+    """
+    bullish_trends = {_TREND_STRONG_BULL, _TREND_BULL, _TREND_WEAK_BULL, _TREND_CONSOLIDATION}
+    bearish_trends = {_TREND_STRONG_BEAR, _TREND_BEAR}
+    strong_bearish_trends = {_TREND_STRONG_BEAR, _TREND_BEAR, _TREND_WEAK_BEAR}
+
+    if score >= 50 and trend_status in {_TREND_STRONG_BULL, _TREND_BULL}:
+        return "强烈买入"
+    if score >= 15 and trend_status not in bearish_trends:
+        return "买入"
+    if score <= -50 and trend_status in bearish_trends:
+        return "强烈卖出"
+    if score <= -15 and trend_status in strong_bearish_trends:
+        return "卖出"
+    return "观望"
+
+
 # ---------------------------------------------------------------------------
 # Helper
 # ---------------------------------------------------------------------------
@@ -152,18 +203,71 @@ def _safe(val, default=None):
     return val
 
 
+def _classify_trend(df: pd.DataFrame) -> tuple[str, int]:
+    """7-level trend classification based on MA alignment and spacing.
+
+    Checks MA5 > MA10 > MA20 (bullish) or MA5 < MA10 < MA20 (bearish),
+    then examines whether the spacing has widened over the past 5 bars
+    to distinguish strong vs regular trends.
+
+    Returns:
+        (trend_status, strength) where:
+        - trend_status: one of _TREND_STRONG_BULL, _TREND_BULL, etc.
+        - strength: integer 0-100 (100 = strongest bull, 0 = strongest bear).
+    """
+    if len(df) < 6:
+        return (_TREND_CONSOLIDATION, 50)
+
+    latest = df.iloc[-1]
+    ma5 = _safe(latest.get("ma5"))
+    ma10 = _safe(latest.get("ma10"))
+    ma20 = _safe(latest.get("ma20"))
+
+    if any(v is None for v in (ma5, ma10, ma20)):
+        return (_TREND_CONSOLIDATION, 50)
+
+    prev = df.iloc[-6]
+    p_ma5 = _safe(prev.get("ma5"))
+    p_ma10 = _safe(prev.get("ma10"))
+
+    def _spacing_widening(p5: float, p10: float) -> bool:
+        """Check if MA5-MA10 spacing has widened by >5% over 5 bars."""
+        if any(v is None for v in (p5, p10)) or p10 == 0:
+            return False
+        prev_gap = (p5 - p10) / abs(p10)
+        curr_gap = (ma5 - ma10) / abs(ma10)
+        if abs(prev_gap) < 1e-6:
+            return abs(curr_gap) > 0.005
+        return (curr_gap - prev_gap) / abs(prev_gap) > 0.05
+
+    if ma5 > ma10 > ma20:
+        if _spacing_widening(p_ma5, p_ma10):
+            return (_TREND_STRONG_BULL, 90)
+        return (_TREND_BULL, 75)
+    if ma5 < ma10 < ma20:
+        if _spacing_widening(p_ma5, p_ma10):
+            return (_TREND_STRONG_BEAR, 10)
+        return (_TREND_BEAR, 25)
+    if ma5 > ma10 and ma10 <= ma20:
+        return (_TREND_WEAK_BULL, 55)
+    if ma5 < ma10 and ma10 >= ma20:
+        return (_TREND_WEAK_BEAR, 40)
+    return (_TREND_CONSOLIDATION, 50)
+
+
 # ---------------------------------------------------------------------------
 # Individual scoring functions
 # ---------------------------------------------------------------------------
 
 
 def score_ma(df: pd.DataFrame) -> tuple[int, str]:
-    """Score based on MA alignment, MA60 position, and price deviation.
+    """Score based on MA alignment, trend classification, and price deviation.
 
     Continuous scoring:
     - Trend strength: (MA5 - MA20) / MA20, scaled to [-6, +6]
     - MA alignment: bonus for bullish/bearish alignment, clamped [-6, +6]
     - Price position vs MA20: (close - MA20) / MA20, scaled to [-8, +8]
+    - Trend bonus: ±3 for strong_bull/strong_bear (trend acceleration)
 
     Returns:
         (score, reason) tuple.
@@ -180,6 +284,8 @@ def score_ma(df: pd.DataFrame) -> tuple[int, str]:
 
     if any(v is None for v in (ma5, ma10, ma20, close)):
         return (0, "MA数据不完整 (NaN)")
+
+    trend_status, trend_strength = _classify_trend(df)
 
     # 1) Trend strength: MA5 vs MA20 spread, normalized by price
     trend = (ma5 - ma20) / ma20 * 200
@@ -214,13 +320,25 @@ def score_ma(df: pd.DataFrame) -> tuple[int, str]:
     position = (close - ma20) / ma20 * 200
     position = max(-8, min(8, position))
 
-    total = trend + alignment + position
+    # 4) Strong trend bonus (trend acceleration signal)
+    trend_bonus = 0.0
+    if trend_status == _TREND_STRONG_BULL:
+        trend_bonus = 3.0
+    elif trend_status == _TREND_STRONG_BEAR:
+        trend_bonus = -3.0
+
+    total = trend + alignment + position + trend_bonus
 
     # Build reason text
+    trend_label = _TREND_STOCK_LABELS.get(trend_status, "未知")
     alignment_labels = {1: "多头", -1: "空头", 0: "混乱"}
     short_label = alignment_labels.get(parts[0], "混乱")
     long_label = alignment_labels.get(parts[1], "无MA60") if has_ma60 else "无MA60"
-    reason = f"趋势={trend:+.1f}; 排列={short_label}/{long_label}={alignment:+.1f}; 偏离={position:+.1f}"
+    reason = (
+        f"趋势={trend_label}({trend_strength}); "
+        f"排列={short_label}/{long_label}={alignment:+.1f}; "
+        f"偏离={position:+.1f}"
+    )
     return (_clamp(total), reason)
 
 
@@ -471,6 +589,59 @@ def score_volume(df: pd.DataFrame) -> tuple[int, str]:
     return (_clamp(score), f"量比={vol_ratio:.2f} {direction_text} → {score:+.1f}")
 
 
+def score_bias(df: pd.DataFrame) -> tuple[int, str]:
+    """Score based on price deviation from MA5 (bias).
+
+    BIAS = (close - MA5) / MA5 * 100%. Penalizes chasing highs and rewards
+    pullbacks near MA5. Strong bull trend (strength >= 70) widens thresholds
+    by 1.5x to avoid missing super-trend moves.
+
+    Returns:
+        (score, reason) tuple.
+    """
+    if len(df) < 2:
+        return (0, "数据不足")
+
+    latest = df.iloc[-1]
+    close = _safe(latest.get("close"))
+    ma5 = _safe(latest.get("ma5"))
+
+    if any(v is None for v in (close, ma5)) or ma5 == 0:
+        return (0, "BIAS数据不完整 (NaN)")
+
+    bias_pct = (close - ma5) / ma5 * 100
+
+    # Strong bull compensation: widen thresholds by 1.5x
+    trend_status, trend_strength = _classify_trend(df)
+    if trend_status == _TREND_STRONG_BULL and trend_strength >= 70:
+        bias_pct_adjusted = bias_pct / 1.5
+    else:
+        bias_pct_adjusted = bias_pct
+
+    # Scoring table (applied to adjusted bias)
+    if bias_pct_adjusted < -5:
+        score = 8
+        label = "乖离过大"
+    elif bias_pct_adjusted < -3:
+        score = 16
+        label = "回踩MA5"
+    elif bias_pct_adjusted < 0:
+        score = 20
+        label = "略低于MA5"
+    elif bias_pct_adjusted < 2:
+        score = 18
+        label = "贴近MA5"
+    elif bias_pct_adjusted < 5:
+        score = 8
+        label = "略高于MA5"
+    else:
+        score = -20
+        label = "乖离过高(追高风险)"
+
+    reason = f"BIAS={bias_pct:+.2f}%; {label} → {score:+.1f}"
+    return (_clamp(score), reason)
+
+
 # ---------------------------------------------------------------------------
 # Composite scoring
 # ---------------------------------------------------------------------------
@@ -482,26 +653,28 @@ _INDICATOR_SCORE_FUNCS = {
     "bollinger": score_bollinger,
     "kdj": score_kdj,
     "volume": score_volume,
+    "bias": score_bias,
 }
 
 
-def calculate_stock_score(df: pd.DataFrame, config: dict) -> tuple[int, list[dict]]:
+def calculate_stock_score(df: pd.DataFrame, config: dict) -> tuple[int, list[dict], str]:
     """Calculate a composite stock score based on weighted indicator evaluation.
 
     Reads indicator configuration from config.json to determine which
     indicators are enabled and their respective weights.
 
-    Raw score = 50 + (weighted_sum / total_weight), producing a value
-    in the approximate range [10, 90].
+    Raw score = (weighted_sum / total_weight) * 5, producing a value
+    in the approximate range [-100, +100].
 
     Args:
         df: DataFrame with all indicator columns already calculated.
         config: Parsed config.json dictionary.
 
     Returns:
-        (raw_score, results) where:
-        - raw_score: Integer score in [10, 90] range.
+        (raw_score, results, trend_status) where:
+        - raw_score: Integer score in [-100, +100] range.
         - results: List of dicts with keys: name, score, reason.
+        - trend_status: One of the _TREND_* constants.
     """
     indicator_config = config.get("indicators", {})
 
@@ -538,7 +711,9 @@ def calculate_stock_score(df: pd.DataFrame, config: dict) -> tuple[int, list[dic
     # Clamp to valid signal range
     raw_score = max(-100, min(100, raw_score))
 
-    return (int(raw_score), results)
+    trend_status, _ = _classify_trend(df)
+
+    return (int(raw_score), results, trend_status)
 
 
 # ---------------------------------------------------------------------------
@@ -693,21 +868,48 @@ def calculate_market_modifier(config: dict, intraday: bool = False) -> tuple[int
 
 
 def calculate_key_levels(df: pd.DataFrame) -> dict:
-    """Calculate support and resistance levels from technical indicators.
+    """Calculate support and resistance levels with validity markers.
+
+    Support validity (✓ marker):
+    - MA5: price within 2% above MA5
+    - MA10: price within 2% above MA10
+    - MA20: price >= MA20
 
     Args:
-        df: DataFrame with indicator columns (ma20, boll_lower, boll_upper, high).
+        df: DataFrame with indicator columns (ma5, ma10, ma20, boll_lower, boll_upper, high).
 
     Returns:
         Dict with "support" and "resistance" keys, each containing a list
-        of (name, value) tuples.
+        of (name, value) tuples. Valid supports include ✓ in the name.
     """
     last = df.iloc[-1]
+    close = _safe(last.get("close"))
     support = []
     resistance = []
 
-    if not pd.isna(last.get("ma20")):
-        support.append(("MA20", last["ma20"]))
+    # MA5 support: price within 2% above MA5
+    ma5 = _safe(last.get("ma5"))
+    if ma5 is not None and close is not None:
+        if close >= ma5 and (close - ma5) / ma5 <= 0.02:
+            support.append(("MA5 ✓", ma5))
+        else:
+            support.append(("MA5", ma5))
+
+    # MA10 support: price within 2% above MA10
+    ma10 = _safe(last.get("ma10"))
+    if ma10 is not None and close is not None:
+        if close >= ma10 and (close - ma10) / ma10 <= 0.02:
+            support.append(("MA10 ✓", ma10))
+        else:
+            support.append(("MA10", ma10))
+
+    # MA20 support: price >= MA20
+    ma20 = _safe(last.get("ma20"))
+    if ma20 is not None and close is not None:
+        if close >= ma20:
+            support.append(("MA20 ✓", ma20))
+        else:
+            support.append(("MA20", ma20))
 
     if not pd.isna(last.get("boll_lower")):
         support.append(("布林下轨", last["boll_lower"]))
@@ -845,6 +1047,7 @@ def format_report(
     is_intraday: bool = False,
     realtime_data: dict | None = None,
     session_label: str = "",
+    trend_status: str = "",
 ) -> str:
     """Format all analysis data into a human-readable text report.
 
@@ -861,6 +1064,7 @@ def format_report(
         is_intraday: Whether this is an intraday analysis.
         realtime_data: Optional dict with real-time quote data.
         session_label: Label describing current market session.
+        trend_status: Stock trend status from _classify_trend().
 
     Returns:
         Formatted multi-line report string.
@@ -879,7 +1083,10 @@ def format_report(
         else:
             date_str = str(raw_date)[:10] if raw_date else ""
 
-    signal = score_to_signal(score)
+    if trend_status:
+        signal = calculate_signal(score, trend_status)
+    else:
+        signal = score_to_signal(score)
 
     lines.append(_CYAN + separator + _RST)
     lines.append(f"  {_BOLD}{stock_name} ({symbol}){_RST} | {date_str}")
@@ -914,12 +1121,12 @@ def format_report(
     # --- Signal + Score ---
     colored_signal = _signal_color(signal)
     colored_score = _score_color(score)
-    if is_intraday:
-        lines.append(f"[信号评级] {colored_signal}")
-        lines.append(f"[综合评分] {colored_score}分")
-    else:
-        lines.append(f"[信号评级] {colored_signal}")
-        lines.append(f"[综合评分] {colored_score}分")
+    lines.append(f"[信号评级] {colored_signal}")
+    lines.append(f"[综合评分] {colored_score}分")
+    if trend_status:
+        trend_label = _TREND_STOCK_LABELS.get(trend_status, trend_status)
+        trend_color = _BULLISH if trend_status in (_TREND_STRONG_BULL, _TREND_BULL, _TREND_WEAK_BULL) else (_BEARISH if trend_status in (_TREND_STRONG_BEAR, _TREND_BEAR, _TREND_WEAK_BEAR) else _WHITE)
+        lines.append(f"[趋势状态] {trend_color}{trend_label}{_RST}")
     lines.append("")
 
     # --- Intraday Real-Time Status ---
@@ -958,6 +1165,7 @@ def format_report(
         bearish_count = sum(1 for r in market_results if r["trend"] == _TRENT_BEARISH)
         modifier_sign = "+" if market_modifier >= 0 else ""
         lines.append(f"大盘修正: {modifier_sign}{market_modifier} ({bullish_count}看涨, {bearish_count}看跌)")
+        lines.append(_DIM + "  (括号内为趋势强度 [-1,+1], 由价格偏离MA20/MACD方向/MA20斜率综合计算)" + _RST)
         lines.append("")
 
     # --- Technical Indicators ---
@@ -995,6 +1203,6 @@ def format_report(
     lines.append(_CYAN + separator + _RST)
 
     # --- Score Reference ---
-    lines.append(_DIM + "评分参考: 强烈买入[50,100] 买入[15,49] 观望[-14,14] 卖出[-49,-15] 强烈卖出[-100,-50]" + _RST)
+    lines.append(_DIM + "评分参考: 强烈买入[50,100]+多头趋势 买入[15,49]+非空头趋势 卖出[-49,-15]+空头趋势 强烈卖出[-100,-50]+空头趋势" + _RST)
 
     return "\n".join(lines)

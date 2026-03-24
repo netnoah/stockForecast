@@ -273,10 +273,14 @@ def calculate_accuracy() -> dict:
             continue
         change = float(change_str.replace("%", ""))  # already in percentage
         is_hit = p["hit"] == "1"
+        signal = _normalize_signal(p["signal"])
+        is_sell = signal in ("卖出", "强烈卖出")
         if is_hit:
-            win_changes.append(change)
+            # Sell hit means price dropped — profit is the avoided loss
+            win_changes.append(abs(change) if is_sell else change)
         else:
-            loss_changes.append(change)
+            # Sell miss means price rose — loss is the missed gain
+            loss_changes.append(-abs(change) if is_sell else change)
 
     avg_profit = sum(win_changes) / len(win_changes) if win_changes else None
     avg_loss = sum(loss_changes) / len(loss_changes) if loss_changes else None
@@ -359,8 +363,8 @@ def format_accuracy_report(stats: dict) -> str:
     expectancy = stats.get("expectancy")
 
     if avg_profit is not None or avg_loss is not None:
-        profit_str = f"+{avg_profit:.2f}%" if avg_profit is not None else "N/A"
-        loss_str = f"{avg_loss:.2f}%" if avg_loss is not None else "N/A"
+        profit_str = f"{avg_profit:+.2f}%" if avg_profit is not None else "N/A"
+        loss_str = f"{avg_loss:+.2f}%" if avg_loss is not None else "N/A"
         if pl_ratio is not None and pl_ratio != float("inf"):
             ratio_str = f"{pl_ratio:.2f}"
         elif pl_ratio == float("inf"):

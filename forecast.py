@@ -11,6 +11,7 @@ from analyzer import (
     load_config,
     calculate_stock_score,
     score_to_signal,
+    calculate_signal,
     calculate_market_modifier,
     calculate_key_levels,
     generate_risk_alerts,
@@ -111,10 +112,10 @@ def analyze_stock(symbol: str, config: dict, refresh: bool = False):
                 df = pd.concat([df, pd.DataFrame([new_row])], ignore_index=True)
 
     df = calc_all_indicators(df)
-    raw_score, ind_results = calculate_stock_score(df, config)
+    raw_score, ind_results, trend_status = calculate_stock_score(df, config)
     modifier, market_results = calculate_market_modifier(config, intraday=intraday)
     final_score = max(-100, min(100, int(raw_score + modifier)))
-    signal = score_to_signal(final_score)
+    signal = calculate_signal(final_score, trend_status)
     key_levels = calculate_key_levels(df)
     risk_alerts = generate_risk_alerts(df, final_score)
     position_advice = calculate_position_advice(final_score, key_levels)
@@ -135,6 +136,7 @@ def analyze_stock(symbol: str, config: dict, refresh: bool = False):
         is_intraday=intraday,
         realtime_data=realtime_data,
         session_label=session_label,
+        trend_status=trend_status,
     )
 
     record_prediction(symbol, stock_name, float(df.iloc[-1]["close"]), signal, final_score, final_score)
