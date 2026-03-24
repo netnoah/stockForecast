@@ -57,29 +57,67 @@ def _session_label() -> str:
     return "盘后分析"
 
 
-def fetch_actual_closes(symbol: str, pred_date: str, max_days: int = 14) -> list[float | None]:
-    """Fetch closing prices for up to max_days trading days after pred_date (used by tracker backfill).
+def fetch_actual_closes(symbol: str, pred_date: str, max_days: int = 14) -> tuple[float | None, list[float | None]]:
+    """Fetch base close and subsequent closes for backfill using unadjusted prices.
 
-    Only uses daily K-line data (refresh=True to bypass stale cache). Returns a list
-    of length max_days, where each element is the close price for that trading day,
-    or None if unavailable.
+    Uses unadjusted (raw) close prices so that the calculated change matches
+    the actual market movement, not distorted by qfq adjustment factor changes.
+
+    Returns (base_close, closes) where base_close is the close on pred_date,
+    and closes is a list of length max_days with close prices for subsequent
+    trading days (None if unavailable).
     """
     try:
-        df = get_stock_history(symbol, refresh=True)
+        from data_source import _fetch_via_akshare, _fetch_via_sina, _dedup_and_sort, _is_hk_stock
+        from data_source import _hk_code, _exchange_prefix
+
+        if _is_hk_stock(symbol):
+            import akshare as ak
+            code = _hk_code(symbol)
+            df = ak.stock_hk_daily(symbol=code, adjust="")
+        else:
+            prefix = _exchange_prefix(symbol)
+            full_code = f"{prefix}{symbol}"
+            df = _fetch_via_akshare_raw(full_code)
+            if df is None or df.empty:
+                df = _fetch_via_sina(full_code)
+            if df is None or df.empty:
+                return (None, [None] * max_days)
+
+        if df is None or df.empty:
+            return (None, [None] * max_days)
+
         df["date_str"] = df["date"].astype(str).str[:10]
         match = df[df["date_str"] == pred_date]
         if len(match) == 0:
-            return [None] * max_days
+            return (None, [None] * max_days)
         idx = match.index[0]
+        base_close = float(df.iloc[idx]["close"])
         closes = []
         for i in range(1, max_days + 1):
             if idx + i < len(df):
                 closes.append(float(df.iloc[idx + i]["close"]))
             else:
                 closes.append(None)
-        return closes
+        return (base_close, closes)
     except Exception:
-        return [None] * max_days
+        return (None, [None] * max_days)
+
+
+def _fetch_via_akshare_raw(full_code: str) -> pd.DataFrame | None:
+    """Fetch daily OHLCV data via akshare WITHOUT adjustment (raw prices)."""
+    try:
+        import akshare as ak
+        df = ak.stock_zh_a_daily(symbol=full_code, adjust="")
+        if df is None or df.empty:
+            return None
+        from data_source import _CSV_COLUMNS
+        df = df.rename(columns={"day": "date"})
+        df = df[_CSV_COLUMNS].copy()
+        df["date"] = pd.to_datetime(df["date"]).dt.strftime("%Y-%m-%d")
+        return df
+    except Exception:
+        return None
 
 
 def analyze_stock(symbol: str, config: dict, refresh: bool = False):
