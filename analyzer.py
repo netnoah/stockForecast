@@ -39,13 +39,9 @@ _WHITE = "\033[37m"
 
 def _signal_color(signal: str) -> str:
     """Return ANSI color for a signal label."""
-    if signal in ("强烈买入",):
+    if signal in ("强烈买入", "买入"):
         return _BULLISH + _BOLD + signal + _RST
-    if signal in ("买入",):
-        return _BULLISH + _BOLD + signal + _RST
-    if signal in ("卖出",):
-        return _BEARISH + signal + _RST
-    if signal in ("强烈卖出",):
+    if signal in ("强烈卖出", "卖出"):
         return _BEARISH + signal + _RST
     return _WHITE + signal + _RST
 
@@ -71,15 +67,6 @@ SIGNAL_RATINGS = [
     (-100, -50, "强烈卖出"),
 ]
 
-# Backward compatibility: English signal names from old CSV data
-_SIGNAL_EN_MAP = {
-    "Strong Buy": "强烈买入",
-    "Buy": "买入",
-    "Hold": "观望",
-    "Sell": "卖出",
-    "Strong Sell": "强烈卖出",
-}
-
 _SCORE_MIN = -100
 _SCORE_MAX = 100
 
@@ -91,14 +78,14 @@ INDEX_NAMES = {
 }
 
 # Trend strength levels for market modifier
-_TRENT_BULLISH = "bullish"
-_TRENT_BEARISH = "bearish"
-_TRENT_NEUTRAL = "neutral"
+_TREND_IDX_BULLISH = "bullish"
+_TREND_IDX_BEARISH = "bearish"
+_TREND_IDX_NEUTRAL = "neutral"
 
-_TRENT_LABELS = {
-    _TRENT_BULLISH: "看涨",
-    _TRENT_BEARISH: "看跌",
-    _TRENT_NEUTRAL: "中性",
+_TREND_IDX_LABELS = {
+    _TREND_IDX_BULLISH: "看涨",
+    _TREND_IDX_BEARISH: "看跌",
+    _TREND_IDX_NEUTRAL: "中性",
 }
 
 # 7-level stock trend classification (for individual stock scoring)
@@ -736,11 +723,11 @@ def classify_index_trend(df: pd.DataFrame) -> tuple[str, float]:
     - Short-term momentum (35%): 3-day and 5-day price change rate
 
     Returns:
-        (trend, strength) where trend is one of _TRENT_* constants
+        (trend, strength) where trend is one of _TREND_IDX_* constants
         and strength is a float in [-1, +1].
     """
     if len(df) < 6:
-        return (_TRENT_NEUTRAL, 0.0)
+        return (_TREND_IDX_NEUTRAL, 0.0)
 
     latest = df.iloc[-1]
     close = _safe(latest.get("close"))
@@ -749,7 +736,7 @@ def classify_index_trend(df: pd.DataFrame) -> tuple[str, float]:
     dea = _safe(latest.get("dea"))
 
     if any(v is None for v in (close, ma20, dif, dea)):
-        return (_TRENT_NEUTRAL, 0.0)
+        return (_TREND_IDX_NEUTRAL, 0.0)
 
     # --- Mid-term trend (lagging, stable direction) ---
     # 1) Price bias from MA20
@@ -789,10 +776,10 @@ def classify_index_trend(df: pd.DataFrame) -> tuple[str, float]:
     strength = max(-1.0, min(1.0, strength))
 
     if strength > 0.15:
-        return (_TRENT_BULLISH, strength)
+        return (_TREND_IDX_BULLISH, strength)
     elif strength < -0.15:
-        return (_TRENT_BEARISH, strength)
-    return (_TRENT_NEUTRAL, strength)
+        return (_TREND_IDX_BEARISH, strength)
+    return (_TREND_IDX_NEUTRAL, strength)
 
 
 def calculate_market_modifier(config: dict, intraday: bool = False) -> tuple[int, list[dict]]:
@@ -863,17 +850,17 @@ def calculate_market_modifier(config: dict, intraday: bool = False) -> tuple[int
                         weight = min(0.2 + abs(day_change) * 15, 0.6)
                         strength = max(-1.0, min(1.0, strength * (1 - weight) + momentum * weight))
                         if strength > 0.15:
-                            trend = _TRENT_BULLISH
+                            trend = _TREND_IDX_BULLISH
                         elif strength < -0.15:
-                            trend = _TRENT_BEARISH
+                            trend = _TREND_IDX_BEARISH
                         else:
-                            trend = _TRENT_NEUTRAL
+                            trend = _TREND_IDX_NEUTRAL
 
             name = INDEX_NAMES.get(code, code)
             results.append({"code": code, "name": name, "trend": trend, "strength": strength})
         except Exception:
             logger.warning("Failed to fetch/calculate index trend for %s, defaulting to neutral", code)
-            results.append({"code": code, "name": INDEX_NAMES.get(code, code), "trend": _TRENT_NEUTRAL, "strength": 0.0})
+            results.append({"code": code, "name": INDEX_NAMES.get(code, code), "trend": _TREND_IDX_NEUTRAL, "strength": 0.0})
 
     # Weighted average of strengths
     total_strength = sum(r["strength"] for r in results)
@@ -1043,9 +1030,9 @@ def generate_risk_alerts(df: pd.DataFrame, score: int) -> list[str]:
 
 def _trend_icon(trend: str) -> str:
     """Return a single-character icon for a trend classification."""
-    if trend == _TRENT_BULLISH:
+    if trend == _TREND_IDX_BULLISH:
         return "+"
-    if trend == _TRENT_BEARISH:
+    if trend == _TREND_IDX_BEARISH:
         return "-"
     return "~"
 
@@ -1183,12 +1170,12 @@ def format_report(
         lines.append(_BOLD + "--- 大盘环境 ---" + _RST)
         for r in market_results:
             icon = _trend_icon(r["trend"])
-            trend_label = _TRENT_LABELS.get(r["trend"], r["trend"])
-            trend_color = _BULLISH if r["trend"] == _TRENT_BULLISH else (_BEARISH if r["trend"] == _TRENT_BEARISH else _WHITE)
+            trend_label = _TREND_IDX_LABELS.get(r["trend"], r["trend"])
+            trend_color = _BULLISH if r["trend"] == _TREND_IDX_BULLISH else (_BEARISH if r["trend"] == _TREND_IDX_BEARISH else _WHITE)
             strength_str = f"({r['strength']:+.2f})" if "strength" in r else ""
             lines.append(f"  [{icon}] {r['name']}: {trend_color}{trend_label}{strength_str}{_RST}")
-        bullish_count = sum(1 for r in market_results if r["trend"] == _TRENT_BULLISH)
-        bearish_count = sum(1 for r in market_results if r["trend"] == _TRENT_BEARISH)
+        bullish_count = sum(1 for r in market_results if r["trend"] == _TREND_IDX_BULLISH)
+        bearish_count = sum(1 for r in market_results if r["trend"] == _TREND_IDX_BEARISH)
         modifier_sign = "+" if market_modifier >= 0 else ""
         lines.append(f"大盘修正: {modifier_sign}{market_modifier} ({bullish_count}看涨, {bearish_count}看跌)")
         lines.append(_DIM + "  (括号内为趋势强度 [-1,+1], 由价格偏离MA20/MACD方向/MA20斜率综合计算)" + _RST)

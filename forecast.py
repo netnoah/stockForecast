@@ -199,7 +199,8 @@ def _hk_traded_minutes() -> int:
     return 330  # full day
 
 
-def analyze_stock(symbol: str, config: dict, refresh: bool = False):
+def analyze_stock(symbol: str, config: dict, refresh: bool = False,
+                  market_modifier: tuple[int, list[dict]] | None = None):
     """Analyze a single stock and return (report_string, signal, score) or None on error."""
     try:
         df = get_stock_history(symbol, refresh=refresh)
@@ -258,7 +259,10 @@ def analyze_stock(symbol: str, config: dict, refresh: bool = False):
                     vol_ratio = (rt_vol / traded_min) / (prev5_avg / total_min)
                     df.iloc[-1, df.columns.get_loc("vol_ratio")] = round(vol_ratio, 2)
     raw_score, ind_results, trend_status = calculate_stock_score(df, config)
-    modifier, market_results = calculate_market_modifier(config, intraday=intraday)
+    if market_modifier is not None:
+        modifier, market_results = market_modifier
+    else:
+        modifier, market_results = calculate_market_modifier(config, intraday=intraday)
     final_score = max(-100, min(100, int(raw_score + modifier)))
     signal = calculate_signal(final_score, trend_status)
     key_levels = calculate_key_levels(df)
@@ -288,7 +292,7 @@ def analyze_stock(symbol: str, config: dict, refresh: bool = False):
 
     logger.info("Analysis complete: %s(%s) score=%d signal=%s", stock_name, symbol, final_score, signal)
 
-    return report, signal, final_score
+    return report, signal, final_score, stock_name
 
 
 def main():
@@ -329,18 +333,21 @@ def main():
     if multiple:
         print(f"正在分析 {len(symbols)} 只股票...\n")
 
+    # Compute market modifier once for all stocks (not per-stock)
+    intraday = is_trading_hours()
+    precomputed_modifier = calculate_market_modifier(config, intraday=intraday)
+
     for i, symbol in enumerate(symbols):
         if multiple:
             print(f"\n{'=' * 50}")
             print(f"  {i + 1}/{len(symbols)} | {symbol}")
             print(f"{'=' * 50}\n")
 
-        result = analyze_stock(symbol, config, args.refresh)
+        result = analyze_stock(symbol, config, args.refresh, market_modifier=precomputed_modifier)
         if result is None:
             continue
-        report, signal, score = result
+        report, signal, score, stock_name = result
         print(report)
-        stock_name = get_stock_name(symbol)
         reports.append({"symbol": symbol, "name": stock_name, "signal": signal, "score": score, "report": report})
 
     # Multi-stock summary

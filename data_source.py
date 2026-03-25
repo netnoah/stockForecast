@@ -467,11 +467,6 @@ def _fetch_hk_realtime_via_tencent(symbol: str) -> dict | None:
         _record_failure("tencent_hk_realtime")
         _logger.error("Tencent HK realtime fetch failed for %s: %s", symbol, exc)
         return None
-        return quote
-    except Exception as exc:
-        _record_failure("tencent_realtime")
-        _logger.error("Tencent realtime fetch failed for %s: %s", symbol, exc)
-        return None
 
 
 # ---------------------------------------------------------------------------
@@ -698,8 +693,11 @@ def get_realtime_quote(symbol: str) -> dict | None:
     return None
 
 
+_name_cache: dict[str, str] = {}
+
+
 def get_stock_name(symbol: str) -> str:
-    """Get the Chinese name of a stock.
+    """Get the Chinese name of a stock (with session-level caching).
 
     A-share uses Tencent (priority) -> Sina fallback with circuit breaker.
 
@@ -709,6 +707,12 @@ def get_stock_name(symbol: str) -> str:
     Returns:
         Stock name string, or the symbol code itself on failure.
     """
+    cached = _name_cache.get(symbol)
+    if cached is not None:
+        return cached
+
+    name = symbol  # default fallback
+
     if _is_hk_stock(symbol):
         code = _hk_code(symbol)
         url = f"http://hq.sinajs.cn/list=rt_hk{code}"
@@ -717,37 +721,38 @@ def get_stock_name(symbol: str) -> str:
             resp.raise_for_status()
             content = resp.text
             parts = content.split('"')
-            if len(parts) < 2:
-                return symbol
-            fields = parts[1].split(",")
-            name = fields[1] if len(fields) > 1 else ""
-            return name if name else symbol
+            if len(parts) >= 2:
+                fields = parts[1].split(",")
+                fetched = fields[1] if len(fields) > 1 else ""
+                if fetched:
+                    name = fetched
         except Exception:
-            return symbol
+            pass
+    else:
+        # A-share: try Tencent first, then Sina
+        if not _is_circuit_open("tencent_realtime"):
+            quote = _fetch_realtime_via_tencent(symbol)
+            if quote is not None and quote.get("name"):
+                name = quote["name"]
 
-    # A-share: try Tencent first, then Sina
-    if not _is_circuit_open("tencent_realtime"):
-        quote = _fetch_realtime_via_tencent(symbol)
-        if quote is not None and quote.get("name"):
-            return quote["name"]
+        if name == symbol and not _is_circuit_open("sina_realtime"):
+            prefix = _exchange_prefix(symbol)
+            full_code = f"{prefix}{symbol}"
+            url = _SINA_REALTIME_URL.format(full_code=full_code)
+            try:
+                resp = _request_with_retry(url, _SINA_HEADERS)
+                resp.raise_for_status()
+                content = resp.text
+                parts = content.split('"')
+                if len(parts) >= 2:
+                    fetched = parts[1].split(",")[0]
+                    if fetched:
+                        name = fetched
+            except Exception:
+                pass
 
-    if not _is_circuit_open("sina_realtime"):
-        prefix = _exchange_prefix(symbol)
-        full_code = f"{prefix}{symbol}"
-        url = _SINA_REALTIME_URL.format(full_code=full_code)
-        try:
-            resp = _request_with_retry(url, _SINA_HEADERS)
-            resp.raise_for_status()
-            content = resp.text
-            parts = content.split('"')
-            if len(parts) < 2:
-                return symbol
-            name = parts[1].split(",")[0]
-            return name if name else symbol
-        except Exception:
-            return symbol
-
-    return symbol
+    _name_cache[symbol] = name
+    return name
 
 
 def get_index_realtime_quote(index_code: str) -> dict | None:
