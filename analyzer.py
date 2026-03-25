@@ -731,10 +731,9 @@ def calculate_stock_score(df: pd.DataFrame, config: dict) -> tuple[int, list[dic
 def classify_index_trend(df: pd.DataFrame) -> tuple[str, float]:
     """Classify the trend of a market index with strength score.
 
-    Combines three signals:
-    - Price vs MA20 position (bias %)
-    - MACD direction (DIF vs DEA)
-    - MA20 slope (5-day change rate)
+    Dual-timeframe approach:
+    - Mid-term (65%): MA20 bias, MACD direction, MA20 slope
+    - Short-term momentum (35%): 3-day and 5-day price change rate
 
     Returns:
         (trend, strength) where trend is one of _TRENT_* constants
@@ -752,6 +751,7 @@ def classify_index_trend(df: pd.DataFrame) -> tuple[str, float]:
     if any(v is None for v in (close, ma20, dif, dea)):
         return (_TRENT_NEUTRAL, 0.0)
 
+    # --- Mid-term trend (lagging, stable direction) ---
     # 1) Price bias from MA20
     bias = (close - ma20) / ma20
     bias_score = max(-1.0, min(1.0, bias * 20))  # ±5% bias → ±1
@@ -769,8 +769,23 @@ def classify_index_trend(df: pd.DataFrame) -> tuple[str, float]:
             slope = (ma20 - ma20_5ago) / ma20_5ago
             slope_score = max(-1.0, min(1.0, slope * 50))
 
-    # Composite strength
-    strength = (bias_score * 0.4 + macd_score * 0.35 + slope_score * 0.25)
+    mid_term = bias_score * 0.4 + macd_score * 0.35 + slope_score * 0.25
+
+    # --- Short-term momentum (responsive to recent moves) ---
+    momentum = 0.0
+    close_1d = _safe(df.iloc[-2].get("close")) if len(df) >= 2 else None
+    close_2d = _safe(df.iloc[-3].get("close")) if len(df) >= 3 else None
+
+    if close_1d is not None and close_1d > 0:
+        m1d = (close - close_1d) / close_1d
+        momentum += max(-1.0, min(1.0, m1d * 50)) * 0.5  # ±2% → ±1
+
+    if close_2d is not None and close_2d > 0:
+        m2d = (close - close_2d) / close_2d
+        momentum += max(-1.0, min(1.0, m2d * 25)) * 0.5  # ±4% → ±1
+
+    # --- Composite ---
+    strength = mid_term * 0.65 + momentum * 0.35
     strength = max(-1.0, min(1.0, strength))
 
     if strength > 0.15:
