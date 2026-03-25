@@ -6,7 +6,7 @@ never interferes with the ANSI-formatted reports printed to stdout.
 
 Usage::
 
-    from logger import setup_logging
+    from src.logger import setup_logging
     setup_logging()
 
     import logging
@@ -18,7 +18,7 @@ import logging
 import os
 from datetime import datetime, timedelta
 
-_PROJECT_ROOT = os.path.dirname(os.path.abspath(__file__))
+_PROJECT_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 _LOG_DIR = os.path.join(_PROJECT_ROOT, "data", "logs")
 _KEEP_DAYS = 3
 
@@ -69,5 +69,7 @@ def setup_logging() -> None:
         root.setLevel(logging.WARNING)
         root.addHandler(handler)
         # App modules use their own loggers — set them to DEBUG
-        for name in ("forecast", "data_source", "indicators", "analyzer", "tracker", "wecom"):
+        for name in ("src.forecast", "src.data_source", "src.indicators",
+                      "src.analyzer", "src.tracker", "src.wecom",
+                      "src.market", "src.scoring", "src.report"):
             logging.getLogger(name).setLevel(logging.DEBUG)

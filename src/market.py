@@ -7,9 +7,9 @@ from datetime import datetime
 
 import pandas as pd
 
-from data_source import get_index_history, get_index_realtime_quote
-from indicators import calc_ma, calc_macd
-from scoring import _safe
+from .data_source import get_index_history, get_index_realtime_quote
+from .indicators import calc_ma, calc_macd
+from .scoring import _safe
 
 logger = logging.getLogger(__name__)
 

@@ -12,7 +12,7 @@ _HIT_DAY_COLUMNS = [f"hit{d}" for d in range(2, _MAX_TRACK_DAYS + 1)]
 _SUMMARY_MARKER = "===命中率==="
 _DATA_VERSION = 3  # Bump to force re-fill all hit columns
 
-_PREDICTIONS_FILE = os.path.join(os.path.dirname(os.path.abspath(__file__)), "data", "predictions.csv")
+_PREDICTIONS_FILE = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "data", "predictions.csv")
 _FIELDS = ["date", "symbol", "name", "price", "signal", "score", "hit"] + _HIT_DAY_COLUMNS
 
 logger = logging.getLogger(__name__)
@@ -88,7 +88,7 @@ def record_prediction(symbol: str, name: str, price: float, signal: str, score: 
 
 def _migrate_predictions(predictions: list[dict], fetch_name_fn) -> list[dict]:
     """Backfill missing 'name' field for old predictions and re-save."""
-    from data_source import get_stock_name
+    from .data_source import get_stock_name
     changed = False
     for pred in predictions:
         if not pred.get("name") or not pred["name"].strip():

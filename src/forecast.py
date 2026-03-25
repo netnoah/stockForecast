@@ -6,10 +6,10 @@ from datetime import datetime
 
 import pandas as pd
 
-from logger import setup_logging
-from data_source import get_stock_history, get_realtime_quote, get_stock_name, _stock_cache_path, _save_cache, fetch_actual_closes, _is_hk_stock
-from indicators import calc_all_indicators
-from analyzer import (
+from .logger import setup_logging
+from .data_source import get_stock_history, get_realtime_quote, get_stock_name, _stock_cache_path, _save_cache, fetch_actual_closes, _is_hk_stock
+from .indicators import calc_all_indicators
+from .analyzer import (
     load_config,
     calculate_stock_score,
     score_to_signal,
@@ -20,14 +20,14 @@ from analyzer import (
     calculate_position_advice,
     format_report,
 )
-from tracker import (
+from .tracker import (
     record_prediction,
     backfill_predictions,
     calculate_accuracy,
     format_accuracy_report,
 )
-from wecom import push_reports
-from models import AnalysisResult
+from .wecom import push_reports
+from .models import AnalysisResult
 
 logger = logging.getLogger(__name__)
 

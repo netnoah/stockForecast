@@ -7,8 +7,8 @@ from datetime import datetime
 
 import pandas as pd
 
-from models import AnalysisResult
-from scoring import (
+from .models import AnalysisResult
+from .scoring import (
     _safe,
     score_to_signal,
     calculate_signal,
@@ -21,7 +21,7 @@ from scoring import (
     _TREND_STRONG_BEAR,
     _TREND_STOCK_LABELS,
 )
-from market import _TREND_IDX_BULLISH, _TREND_IDX_BEARISH, _TREND_IDX_NEUTRAL, _TREND_IDX_LABELS
+from .market import _TREND_IDX_BULLISH, _TREND_IDX_BEARISH, _TREND_IDX_NEUTRAL, _TREND_IDX_LABELS
 
 logger = logging.getLogger(__name__)
 

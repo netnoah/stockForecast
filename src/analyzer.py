@@ -29,7 +29,7 @@ def load_config() -> dict:
     Returns:
         Parsed configuration dictionary.
     """
-    config_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), "config.json")
+    config_path = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "config.json")
     with open(config_path, "r", encoding="utf-8") as f:
         return json.load(f)
 
@@ -38,7 +38,7 @@ def load_config() -> dict:
 # Re-export from scoring
 # ---------------------------------------------------------------------------
 
-from scoring import (  # noqa: E402
+from .scoring import (  # noqa: E402
     _clamp,
     _safe,
     _classify_trend,
@@ -52,7 +52,7 @@ from scoring import (  # noqa: E402
 # Re-export from market
 # ---------------------------------------------------------------------------
 
-from market import (  # noqa: E402
+from .market import (  # noqa: E402
     classify_index_trend,
     calculate_market_modifier,
     INDEX_NAMES,
@@ -62,7 +62,7 @@ from market import (  # noqa: E402
 # Re-export from report
 # ---------------------------------------------------------------------------
 
-from report import format_report  # noqa: E402
+from .report import format_report  # noqa: E402
 
 
 # ---------------------------------------------------------------------------

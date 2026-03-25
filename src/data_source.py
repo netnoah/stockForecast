@@ -47,7 +47,7 @@ _SINA_REALTIME_URL = "http://hq.sinajs.cn/list={full_code}"
 
 _TENCENT_REALTIME_URL = "http://qt.gtimg.cn/q={full_code}"
 
-_PROJECT_ROOT = os.path.dirname(os.path.abspath(__file__))
+_PROJECT_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 _HISTORY_DIR = os.path.join(_PROJECT_ROOT, "data", "history")
 
 _CSV_COLUMNS = ["date", "open", "high", "low", "close", "volume"]

@@ -10,15 +10,15 @@ A股量化分析工具 — predicts stock trends using technical indicators (MA,
 
 ```bash
 # Analyze stocks
-python forecast.py 002602              # single stock
-python forecast.py 002602 600519        # multiple stocks
-python forecast.py -l                  # use config.json stock_list
+python -m src.forecast 002602              # single stock
+python -m src.forecast 002602 600519        # multiple stocks
+python -m src.forecast -l                  # use config.json stock_list
 
 # Review prediction accuracy
-python forecast.py --review
+python -m src.forecast --review
 
 # Force refresh cached data
-python forecast.py 002602 --refresh
+python -m src.forecast 002602 --refresh
 
 # Install dependencies
 pip install -r requirements.txt
@@ -27,11 +27,17 @@ pip install -r requirements.txt
 ## Architecture
 
 ```
-forecast.py          # CLI entry point, orchestration
+src/
+├── __init__.py
+├── forecast.py      # CLI entry point, orchestration
 ├── logger.py        # File-only logging setup, daily log files in data/logs/
 ├── data_source.py   # Data fetching: akshare → Sina API fallback, CSV cache in data/history/
 ├── indicators.py    # Technical indicator calculations (MA, MACD, RSI, KDJ, Bollinger, Volume)
-├── analyzer.py      # Scoring engine, signal generation, report formatting
+├── analyzer.py      # Scoring engine, signal generation, report formatting (facade)
+├── scoring.py       # Indicator scoring engine, composite score calculation
+├── market.py        # Market modifier calculation based on broad index trends
+├── report.py        # Report formatting with ANSI color support
+├── models.py        # Data models (AnalysisResult dataclass)
 ├── tracker.py       # Prediction logging to CSV, backfilling actuals, accuracy stats
 └── wecom.py         # WeChat Work webhook report pushing
 ```
