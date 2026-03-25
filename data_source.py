@@ -63,26 +63,77 @@ _MAX_RETRIES = 3
 # Module-level state
 # ---------------------------------------------------------------------------
 
-_circuit_breaker: dict[str, dict] = {}
-_last_request_time: float = 0.0
+
+class RequestManager:
+    """Encapsulates circuit breaker and throttle state for testability."""
+
+    def __init__(self) -> None:
+        self._circuit_breaker: dict[str, dict] = {}
+        self._last_request_time: float = 0.0
+
+    def throttle(self) -> None:
+        """Add a random delay between consecutive requests to avoid rate-limiting."""
+        now = time.time()
+        elapsed = now - self._last_request_time
+        if elapsed < _THROTTLE_MIN:
+            delay = random.uniform(_THROTTLE_MIN, _THROTTLE_MAX)
+            time.sleep(delay)
+        self._last_request_time = time.time()
+
+    def is_circuit_open(self, source_name: str) -> bool:
+        """Check whether a data source is in its cool-down period."""
+        state = self._circuit_breaker.get(source_name)
+        if state is None:
+            return False
+        if state["failures"] < _CIRCUIT_BREAKER_THRESHOLD:
+            return False
+        if time.time() >= state["cooldown_until"]:
+            _logger.info("Circuit breaker for '%s' cool-down expired, re-enabling", source_name)
+            state["failures"] = 0
+            state["cooldown_until"] = 0.0
+            return False
+        return True
+
+    def record_success(self, source_name: str) -> None:
+        """Reset failure counter for a data source after a successful request."""
+        state = self._circuit_breaker.get(source_name)
+        if state is not None and state["failures"] > 0:
+            _logger.info("Source '%s' recovered, resetting circuit breaker", source_name)
+            state["failures"] = 0
+            state["cooldown_until"] = 0.0
+
+    def record_failure(self, source_name: str) -> None:
+        """Record a failure and possibly trip the circuit breaker."""
+        state = self._circuit_breaker.setdefault(
+            source_name, {"failures": 0, "cooldown_until": 0.0}
+        )
+        state["failures"] += 1
+        if state["failures"] >= _CIRCUIT_BREAKER_THRESHOLD:
+            state["cooldown_until"] = time.time() + _CIRCUIT_BREAKER_COOLDOWN
+            _logger.warning(
+                "Circuit breaker tripped for '%s' (%d consecutive failures), "
+                "cool-down for %ds",
+            source_name, state["failures"], _CIRCUIT_BREAKER_COOLDOWN,
+        )
+
+
+# Module-level singleton
+_request_mgr = RequestManager()
 
 _logger = logging.getLogger(__name__)
 
 
 # ---------------------------------------------------------------------------
-# Retry / Throttle / Circuit Breaker helpers
+# Retry / Throttle / Circuit Breaker (backward-compatible proxies)
 # ---------------------------------------------------------------------------
 
 
 def _request_with_retry(url: str, headers: dict, max_retries: int = _MAX_RETRIES) -> requests.Response:
-    """HTTP GET with exponential back-off retry.
-
-    Retries on ConnectionError, TimeoutError, and requests.ConnectionError.
-    """
+    """HTTP GET with exponential back-off retry."""
     last_exc: Exception | None = None
     for attempt in range(1, max_retries + 1):
         try:
-            _throttle()
+            _request_mgr.throttle()
             resp = requests.get(url, headers=headers, timeout=10)
             resp.raise_for_status()
             return resp
@@ -106,53 +157,22 @@ def _request_with_retry(url: str, headers: dict, max_retries: int = _MAX_RETRIES
 
 def _throttle() -> None:
     """Add a random delay between consecutive requests to avoid rate-limiting."""
-    global _last_request_time
-    now = time.time()
-    elapsed = now - _last_request_time
-    if elapsed < _THROTTLE_MIN:
-        delay = random.uniform(_THROTTLE_MIN, _THROTTLE_MAX)
-        time.sleep(delay)
-    _last_request_time = time.time()
+    _request_mgr.throttle()
 
 
 def _is_circuit_open(source_name: str) -> bool:
     """Check whether a data source is in its cool-down period."""
-    state = _circuit_breaker.get(source_name)
-    if state is None:
-        return False
-    if state["failures"] < _CIRCUIT_BREAKER_THRESHOLD:
-        return False
-    if time.time() >= state["cooldown_until"]:
-        # Cool-down expired — give it another chance
-        _logger.info("Circuit breaker for '%s' cool-down expired, re-enabling", source_name)
-        state["failures"] = 0
-        state["cooldown_until"] = 0.0
-        return False
-    return True
+    return _request_mgr.is_circuit_open(source_name)
 
 
 def _record_success(source_name: str) -> None:
     """Reset failure counter for a data source after a successful request."""
-    state = _circuit_breaker.get(source_name)
-    if state is not None and state["failures"] > 0:
-        _logger.info("Source '%s' recovered, resetting circuit breaker", source_name)
-        state["failures"] = 0
-        state["cooldown_until"] = 0.0
+    _request_mgr.record_success(source_name)
 
 
 def _record_failure(source_name: str) -> None:
     """Record a failure and possibly trip the circuit breaker."""
-    state = _circuit_breaker.setdefault(
-        source_name, {"failures": 0, "cooldown_until": 0.0}
-    )
-    state["failures"] += 1
-    if state["failures"] >= _CIRCUIT_BREAKER_THRESHOLD:
-        state["cooldown_until"] = time.time() + _CIRCUIT_BREAKER_COOLDOWN
-        _logger.warning(
-            "Circuit breaker tripped for '%s' (%d consecutive failures), "
-            "cool-down for %ds",
-            source_name, state["failures"], _CIRCUIT_BREAKER_COOLDOWN,
-        )
+    _request_mgr.record_failure(source_name)
 
 
 # ---------------------------------------------------------------------------
@@ -827,3 +847,86 @@ def get_index_history(index_code: str, refresh: bool = False) -> pd.DataFrame:
     df = _dedup_and_sort(df)
     _save_cache(df, cache_filepath)
     return df.copy()
+
+
+# ---------------------------------------------------------------------------
+# Actual closes for backfill
+# ---------------------------------------------------------------------------
+
+
+def _fetch_via_akshare_raw(full_code: str) -> pd.DataFrame | None:
+    """Fetch daily OHLCV data via akshare WITHOUT adjustment (raw prices)."""
+    try:
+        import akshare as ak
+        df = ak.stock_zh_a_daily(symbol=full_code, adjust="")
+        if df is None or df.empty:
+            return None
+        df = df.rename(columns={"day": "date"})
+        df = df[_CSV_COLUMNS].copy()
+        df["date"] = pd.to_datetime(df["date"]).dt.strftime("%Y-%m-%d")
+        return df
+    except Exception:
+        return None
+
+
+def fetch_actual_closes(symbol: str, pred_date: str, max_days: int = 14) -> tuple[float | None, list[float | None]]:
+    """Fetch base close and subsequent closes for backfill.
+
+    Priority: cached data (via get_stock_history) -> raw API fetch.
+
+    Returns (base_close, closes) where base_close is the close on pred_date,
+    and closes is a list of length max_days with close prices for subsequent
+    trading days (None if unavailable).
+    """
+    # 1. Try cached data first
+    try:
+        df = get_stock_history(symbol)
+        if df is not None and not df.empty:
+            match = df[df["date"].astype(str).str[:10] == pred_date]
+            if len(match) > 0:
+                idx = match.index[0]
+                base_close = float(df.iloc[idx]["close"])
+                closes = []
+                for i in range(1, max_days + 1):
+                    if idx + i < len(df):
+                        closes.append(float(df.iloc[idx + i]["close"]))
+                    else:
+                        closes.append(None)
+                if any(c is not None for c in closes):
+                    return (base_close, closes)
+    except Exception:
+        pass
+
+    # 2. Fallback to raw API
+    try:
+        if _is_hk_stock(symbol):
+            import akshare as ak
+            code = _hk_code(symbol)
+            df = ak.stock_hk_daily(symbol=code, adjust="")
+        else:
+            prefix = _exchange_prefix(symbol)
+            full_code = f"{prefix}{symbol}"
+            df = _fetch_via_akshare_raw(full_code)
+            if df is None or df.empty:
+                df = _fetch_via_sina(full_code)
+            if df is None or df.empty:
+                return (None, [None] * max_days)
+
+        if df is None or df.empty:
+            return (None, [None] * max_days)
+
+        df["date_str"] = df["date"].astype(str).str[:10]
+        match = df[df["date_str"] == pred_date]
+        if len(match) == 0:
+            return (None, [None] * max_days)
+        idx = match.index[0]
+        base_close = float(df.iloc[idx]["close"])
+        closes = []
+        for i in range(1, max_days + 1):
+            if idx + i < len(df):
+                closes.append(float(df.iloc[idx + i]["close"]))
+            else:
+                closes.append(None)
+        return (base_close, closes)
+    except Exception:
+        return (None, [None] * max_days)

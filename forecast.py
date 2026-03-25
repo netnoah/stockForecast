@@ -7,7 +7,7 @@ from datetime import datetime
 import pandas as pd
 
 from logger import setup_logging
-from data_source import get_stock_history, get_realtime_quote, get_stock_name, _stock_cache_path, _save_cache
+from data_source import get_stock_history, get_realtime_quote, get_stock_name, _stock_cache_path, _save_cache, fetch_actual_closes, _is_hk_stock
 from indicators import calc_all_indicators
 from analyzer import (
     load_config,
@@ -27,6 +27,7 @@ from tracker import (
     format_accuracy_report,
 )
 from wecom import push_reports
+from models import AnalysisResult
 
 logger = logging.getLogger(__name__)
 
@@ -58,90 +59,6 @@ def _session_label() -> str:
     if 15.0 < hour_min <= 17.0:
         return "盘后分析 (今日收盘数据)"
     return "盘后分析"
-
-
-def fetch_actual_closes(symbol: str, pred_date: str, max_days: int = 14) -> tuple[float | None, list[float | None]]:
-    """Fetch base close and subsequent closes for backfill.
-
-    Priority: cached data (via get_stock_history) -> raw API fetch.
-    qfq-adjusted prices preserve percentage changes within the same series,
-    so they are safe for actual_change calculation.
-
-    Returns (base_close, closes) where base_close is the close on pred_date,
-    and closes is a list of length max_days with close prices for subsequent
-    trading days (None if unavailable).
-    """
-    # 1. Try cached data first (qfq, but percentage changes are preserved)
-    try:
-        df = get_stock_history(symbol)
-        if df is not None and not df.empty:
-            match = df[df["date"].astype(str).str[:10] == pred_date]
-            if len(match) > 0:
-                idx = match.index[0]
-                base_close = float(df.iloc[idx]["close"])
-                closes = []
-                for i in range(1, max_days + 1):
-                    if idx + i < len(df):
-                        closes.append(float(df.iloc[idx + i]["close"]))
-                    else:
-                        closes.append(None)
-                if any(c is not None for c in closes):
-                    return (base_close, closes)
-    except Exception:
-        pass
-
-    # 2. Fallback to raw API (existing logic)
-    try:
-        from data_source import _fetch_via_akshare, _fetch_via_sina, _dedup_and_sort, _is_hk_stock
-        from data_source import _hk_code, _exchange_prefix
-
-        if _is_hk_stock(symbol):
-            import akshare as ak
-            code = _hk_code(symbol)
-            df = ak.stock_hk_daily(symbol=code, adjust="")
-        else:
-            prefix = _exchange_prefix(symbol)
-            full_code = f"{prefix}{symbol}"
-            df = _fetch_via_akshare_raw(full_code)
-            if df is None or df.empty:
-                df = _fetch_via_sina(full_code)
-            if df is None or df.empty:
-                return (None, [None] * max_days)
-
-        if df is None or df.empty:
-            return (None, [None] * max_days)
-
-        df["date_str"] = df["date"].astype(str).str[:10]
-        match = df[df["date_str"] == pred_date]
-        if len(match) == 0:
-            return (None, [None] * max_days)
-        idx = match.index[0]
-        base_close = float(df.iloc[idx]["close"])
-        closes = []
-        for i in range(1, max_days + 1):
-            if idx + i < len(df):
-                closes.append(float(df.iloc[idx + i]["close"]))
-            else:
-                closes.append(None)
-        return (base_close, closes)
-    except Exception:
-        return (None, [None] * max_days)
-
-
-def _fetch_via_akshare_raw(full_code: str) -> pd.DataFrame | None:
-    """Fetch daily OHLCV data via akshare WITHOUT adjustment (raw prices)."""
-    try:
-        import akshare as ak
-        df = ak.stock_zh_a_daily(symbol=full_code, adjust="")
-        if df is None or df.empty:
-            return None
-        from data_source import _CSV_COLUMNS
-        df = df.rename(columns={"day": "date"})
-        df = df[_CSV_COLUMNS].copy()
-        df["date"] = pd.to_datetime(df["date"]).dt.strftime("%Y-%m-%d")
-        return df
-    except Exception:
-        return None
 
 
 def _a_share_traded_minutes() -> int:
@@ -201,7 +118,7 @@ def _hk_traded_minutes() -> int:
 
 def analyze_stock(symbol: str, config: dict, refresh: bool = False,
                   market_modifier: tuple[int, list[dict]] | None = None):
-    """Analyze a single stock and return (report_string, signal, score) or None on error."""
+    """Analyze a single stock and return AnalysisResult or None on error."""
     try:
         df = get_stock_history(symbol, refresh=refresh)
     except RuntimeError as e:
@@ -244,7 +161,7 @@ def analyze_stock(symbol: str, config: dict, refresh: bool = False,
     if intraday and realtime_data and realtime_data.get("volume_ratio") is not None:
         df.iloc[-1, df.columns.get_loc("vol_ratio")] = realtime_data["volume_ratio"]
     elif intraday and realtime_data:
-        from data_source import _is_hk_stock as _check_hk
+        _check_hk = _is_hk_stock
         rt_vol = realtime_data.get("volume", 0)
         if rt_vol and rt_vol > 0 and len(df) >= 6:
             prev5_avg = df.iloc[-6:-1]["volume"].astype(float).mean()
@@ -271,11 +188,12 @@ def analyze_stock(symbol: str, config: dict, refresh: bool = False,
 
     stock_name = get_stock_name(symbol)
 
-    report = format_report(
+    result = AnalysisResult(
         symbol=symbol,
         stock_name=stock_name,
-        df=df,
         score=final_score,
+        signal=signal,
+        trend_status=trend_status,
         indicator_results=ind_results,
         market_modifier=modifier,
         market_results=market_results,
@@ -285,14 +203,15 @@ def analyze_stock(symbol: str, config: dict, refresh: bool = False,
         is_intraday=intraday,
         realtime_data=realtime_data,
         session_label=session_label,
-        trend_status=trend_status,
     )
+
+    result.report = format_report(result, df)
 
     record_prediction(symbol, stock_name, float(df.iloc[-1]["close"]), signal, final_score)
 
     logger.info("Analysis complete: %s(%s) score=%d signal=%s", stock_name, symbol, final_score, signal)
 
-    return report, signal, final_score, stock_name
+    return result
 
 
 def main():
@@ -346,9 +265,9 @@ def main():
         result = analyze_stock(symbol, config, args.refresh, market_modifier=precomputed_modifier)
         if result is None:
             continue
-        report, signal, score, stock_name = result
-        print(report)
-        reports.append({"symbol": symbol, "name": stock_name, "signal": signal, "score": score, "report": report})
+        print(result.report)
+        reports.append({"symbol": result.symbol, "name": result.stock_name,
+                        "signal": result.signal, "score": result.score, "report": result.report})
 
     # Multi-stock summary
     push_sections: list[str] = []
