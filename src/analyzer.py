@@ -98,11 +98,13 @@ def calculate_key_levels(df: pd.DataFrame) -> dict:
         else:
             support.append(("MA20", ma20))
 
-    if not pd.isna(last.get("boll_lower")):
-        support.append(("布林下轨", last["boll_lower"]))
+    boll_lower = _safe(last.get("boll_lower"))
+    if boll_lower is not None:
+        support.append(("布林下轨", boll_lower))
 
-    if not pd.isna(last.get("boll_upper")):
-        resistance.append(("布林上轨", last["boll_upper"]))
+    boll_upper = _safe(last.get("boll_upper"))
+    if boll_upper is not None:
+        resistance.append(("布林上轨", boll_upper))
 
     recent_high = df["high"].tail(20).max()
     resistance.append(("20日高点", recent_high))

@@ -130,8 +130,9 @@ def send_to_wecom(webhook_url: str, content: str, msg_format: str = "markdown") 
     content_bytes = content.encode("utf-8")
     if len(content_bytes) > _WECOM_MAX_SIZE:
         logger.debug("Message truncated: %d bytes > %d limit", len(content_bytes), _WECOM_MAX_SIZE)
-        content = content[:_WECOM_MAX_SIZE - 20].encode("utf-8", errors="ignore").decode("utf-8", errors="ignore")
+        content = content_bytes[:_WECOM_MAX_SIZE - 20].decode("utf-8", errors="ignore")
         content += "\n\n[内容过长已截断]"
+        content_bytes = content.encode("utf-8")
 
     if msg_format == "markdown":
         payload = {

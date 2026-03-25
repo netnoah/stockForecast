@@ -7,7 +7,7 @@ from datetime import datetime
 import pandas as pd
 
 from .logger import setup_logging
-from .data_source import get_stock_history, get_realtime_quote, get_stock_name, _stock_cache_path, _save_cache, fetch_actual_closes, _is_hk_stock
+from .data_source import get_stock_history, get_realtime_quote, get_stock_name, merge_intraday_row, fetch_actual_closes, is_hk_stock
 from .indicators import calc_all_indicators
 from .analyzer import (
     load_config,
@@ -50,7 +50,7 @@ def _session_label() -> str:
     """Return a label describing the current market session."""
     now = datetime.now()
     hour_min = now.hour + now.minute / 60
-    if 9.5 <= hour_min <= 11.5:
+    if 9.5 <= hour_min < 11.5:
         return "盘中实时分析"
     if 11.5 < hour_min < 13.0:
         return "午间休市 (上午收盘数据)"
@@ -139,19 +139,7 @@ def analyze_stock(symbol: str, config: dict, refresh: bool = False,
         realtime_data = get_realtime_quote(symbol)
         session_label = _session_label()
         if realtime_data:
-            today_str = datetime.now().strftime("%Y-%m-%d")
-            last_date = str(df.iloc[-1]["date"])[:10]
-            if last_date != today_str:
-                new_row = {
-                    "date": today_str,
-                    "open": realtime_data["open"],
-                    "high": realtime_data["high"],
-                    "low": realtime_data["low"],
-                    "close": realtime_data["close"],
-                    "volume": realtime_data["volume"],
-                }
-                df = pd.concat([df, pd.DataFrame([new_row])], ignore_index=True)
-                _save_cache(df, _stock_cache_path(symbol))
+            df = merge_intraday_row(symbol, df, realtime_data)
 
     df = calc_all_indicators(df)
 
@@ -159,14 +147,14 @@ def analyze_stock(symbol: str, config: dict, refresh: bool = False,
     # - A-share: use Tencent API volume_ratio (field 49, exchange-provided)
     # - HK stock: use Tencent API volume_ratio (field 50), fallback to time-adjusted calc
     if intraday and realtime_data and realtime_data.get("volume_ratio") is not None:
-        df.iloc[-1, df.columns.get_loc("vol_ratio")] = realtime_data["volume_ratio"]
+        df = df.copy()
+        df.loc[df.index[-1], "vol_ratio"] = realtime_data["volume_ratio"]
     elif intraday and realtime_data:
-        _check_hk = _is_hk_stock
         rt_vol = realtime_data.get("volume", 0)
         if rt_vol and rt_vol > 0 and len(df) >= 6:
             prev5_avg = df.iloc[-6:-1]["volume"].astype(float).mean()
             if prev5_avg > 0:
-                if _check_hk(symbol):
+                if is_hk_stock(symbol):
                     traded_min = _hk_traded_minutes()
                     total_min = 330
                 else:
@@ -174,7 +162,8 @@ def analyze_stock(symbol: str, config: dict, refresh: bool = False,
                     total_min = 240
                 if traded_min > 0:
                     vol_ratio = (rt_vol / traded_min) / (prev5_avg / total_min)
-                    df.iloc[-1, df.columns.get_loc("vol_ratio")] = round(vol_ratio, 2)
+                    df = df.copy()
+                    df.loc[df.index[-1], "vol_ratio"] = round(vol_ratio, 2)
     raw_score, ind_results, trend_status = calculate_stock_score(df, config)
     if market_modifier is not None:
         modifier, market_results = market_modifier

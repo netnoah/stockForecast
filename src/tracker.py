@@ -126,18 +126,14 @@ def read_predictions() -> list[dict]:
     if not os.path.exists(_PREDICTIONS_FILE):
         return []
 
+    predictions = []
     for enc in ('utf-8-sig', 'utf-8', 'gbk', 'gb18030'):
         try:
             with open(_PREDICTIONS_FILE, 'r', newline='', encoding=enc) as f:
-                reader = csv.DictReader(f)
-                predictions = list(reader)
+                predictions = list(csv.DictReader(f))
             break
         except (UnicodeDecodeError, UnicodeError):
             continue
-    else:
-        predictions = []
-        reader = csv.DictReader(f)
-        predictions = list(reader)
 
     # Extract and filter out summary row; check data version
     summary_version = None
@@ -332,9 +328,9 @@ def _calculate_hit(signal: str, actual_change: float) -> bool:
     normalized = _normalize_signal(signal)
 
     if normalized in ("强烈买入", "买入"):
-        return actual_up and abs(actual_change) > _ROUND_TRIP_COST
+        return actual_change >= 0 and (actual_change == 0 or abs(actual_change) > _ROUND_TRIP_COST)
     elif normalized in ("强烈卖出", "卖出"):
-        return not actual_up and abs(actual_change) > _ROUND_TRIP_COST
+        return actual_change <= 0 and (actual_change == 0 or abs(actual_change) > _ROUND_TRIP_COST)
     else:  # Hold / 观望
         return abs(actual_change) < 0.01  # ±1%
 

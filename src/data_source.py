@@ -180,7 +180,7 @@ def _record_failure(source_name: str) -> None:
 # ---------------------------------------------------------------------------
 
 
-def _is_hk_stock(symbol: str) -> bool:
+def is_hk_stock(symbol: str) -> bool:
     """Return True if the symbol is a Hong Kong stock (e.g. 'hk2400')."""
     return symbol.lower().startswith("hk")
 
@@ -201,7 +201,7 @@ def _exchange_prefix(code: str) -> str:
     Codes starting with 6, 9, 5 belong to Shanghai (sh).
     All others belong to Shenzhen (sz).
     """
-    if _is_hk_stock(code):
+    if is_hk_stock(code):
         return "hk"
     first_char = code[0] if code else ""
     if first_char in ("6", "9", "5"):
@@ -314,7 +314,7 @@ def _fetch_history(full_code: str) -> pd.DataFrame:
 
     Raises RuntimeError if both sources fail.
     """
-    if _is_hk_stock(full_code):
+    if is_hk_stock(full_code):
         df = _fetch_via_akshare_hk(full_code)
         if df is not None and not df.empty:
             return df
@@ -336,7 +336,7 @@ def _fetch_history(full_code: str) -> pd.DataFrame:
 
 def _fetch_incremental(full_code: str, after_date: str) -> pd.DataFrame:
     """Fetch data after a given date. Falls back to full fetch on failure."""
-    if _is_hk_stock(full_code):
+    if is_hk_stock(full_code):
         # HK stocks: full fetch via akshare then filter (no incremental Sina K-line API)
         try:
             df = _fetch_via_akshare_hk(full_code)
@@ -386,7 +386,7 @@ def _fetch_realtime_via_tencent(symbol: str) -> dict | None:
     Returns dict with keys: date, open, high, low, close, prev_close, volume, name.
     Returns None on failure.
     """
-    if _is_hk_stock(symbol):
+    if is_hk_stock(symbol):
         return None
 
     prefix = _exchange_prefix(symbol)
@@ -446,7 +446,7 @@ def _fetch_hk_realtime_via_tencent(symbol: str) -> dict | None:
     Returns dict with keys: date, open, high, low, close, prev_close, volume, volume_ratio, name.
     Returns None on failure.
     """
-    if not _is_hk_stock(symbol):
+    if not is_hk_stock(symbol):
         return None
 
     code = _hk_code(symbol)
@@ -500,7 +500,7 @@ def _fetch_realtime_via_sina(symbol: str) -> dict | None:
     Returns dict with keys: date, open, high, low, close, prev_close, volume, name.
     Returns None on failure.
     """
-    if _is_hk_stock(symbol):
+    if is_hk_stock(symbol):
         return None
 
     prefix = _exchange_prefix(symbol)
@@ -593,21 +593,37 @@ def _cache_is_stale(latest_date: pd.Timestamp) -> bool:
     return False
 
 
+def _find_cached_name(full_code: str) -> str | None:
+    """Extract stock name from an existing cache filename, avoiding an API call.
+
+    Scans the history directory for a file matching ``{full_code}_{name}.csv``
+    and returns the extracted *name*, or ``None`` if no match is found.
+    """
+    try:
+        for filename in os.listdir(_HISTORY_DIR):
+            if filename.startswith(f"{full_code}_") and filename.endswith(".csv"):
+                prefix_len = len(full_code) + 1
+                return filename[prefix_len:-4]
+    except OSError:
+        pass
+    return None
+
+
 def _stock_cache_path(symbol: str) -> str:
     """Return the cache CSV path for a stock, including Chinese name in filename.
 
     Falls back to old naming (code-only) if the name cannot be retrieved,
     and migrates old files to the new naming convention.
     """
-    if _is_hk_stock(symbol):
+    if is_hk_stock(symbol):
         code = _hk_code(symbol)
-        name = get_stock_name(symbol)
+        name = _find_cached_name(f"hk{code}") or get_stock_name(symbol)
         cache_file = f"hk{code}_{name}.csv"
         return _cache_path(cache_file)
 
     prefix = _exchange_prefix(symbol)
     full_code = f"{prefix}{symbol}"
-    name = get_stock_name(symbol)
+    name = _find_cached_name(full_code) or get_stock_name(symbol)
 
     new_cache_file = f"{full_code}_{name}.csv"
     new_filepath = _cache_path(new_cache_file)
@@ -625,6 +641,39 @@ def _stock_cache_path(symbol: str) -> str:
     return new_filepath
 
 
+def merge_intraday_row(symbol: str, df: pd.DataFrame, realtime_data: dict) -> pd.DataFrame:
+    """Append today's realtime row to historical df and persist to cache.
+
+    If the latest date in *df* is already today, returns *df* unchanged.
+    Otherwise concatenates a new row built from *realtime_data*, saves the
+    result to the CSV cache, and returns a new DataFrame.
+
+    Args:
+        symbol: Stock code (e.g. '002602', 'hk2400').
+        df: Historical daily OHLCV DataFrame.
+        realtime_data: Dict with keys open, high, low, close, volume.
+
+    Returns:
+        DataFrame with the intraday row appended (or *df* if not needed).
+    """
+    today_str = datetime.now().strftime("%Y-%m-%d")
+    last_date = str(df.iloc[-1]["date"])[:10]
+    if last_date == today_str:
+        return df
+
+    new_row = {
+        "date": today_str,
+        "open": realtime_data["open"],
+        "high": realtime_data["high"],
+        "low": realtime_data["low"],
+        "close": realtime_data["close"],
+        "volume": realtime_data["volume"],
+    }
+    merged = pd.concat([df, pd.DataFrame([new_row])], ignore_index=True)
+    _save_cache(merged, _stock_cache_path(symbol))
+    return merged
+
+
 def get_stock_history(symbol: str, refresh: bool = False) -> pd.DataFrame:
     """Get historical daily OHLCV data for a stock.
 
@@ -635,7 +684,7 @@ def get_stock_history(symbol: str, refresh: bool = False) -> pd.DataFrame:
     Returns:
         DataFrame with columns: date, open, high, low, close, volume.
     """
-    if _is_hk_stock(symbol):
+    if is_hk_stock(symbol):
         full_code = symbol  # e.g. 'hk2400' — already includes prefix
     else:
         prefix = _exchange_prefix(symbol)
@@ -685,7 +734,7 @@ def get_realtime_quote(symbol: str) -> dict | None:
         Dict with keys: date, open, high, low, close, volume, name.
         Returns None if the quote cannot be retrieved.
     """
-    if _is_hk_stock(symbol):
+    if is_hk_stock(symbol):
         # HK: try Tencent first (has volume_ratio), fallback to Sina
         if not _is_circuit_open("tencent_hk_realtime"):
             quote = _fetch_hk_realtime_via_tencent(symbol)
@@ -733,7 +782,7 @@ def get_stock_name(symbol: str) -> str:
 
     name = symbol  # default fallback
 
-    if _is_hk_stock(symbol):
+    if is_hk_stock(symbol):
         code = _hk_code(symbol)
         url = f"http://hq.sinajs.cn/list=rt_hk{code}"
         try:
@@ -899,7 +948,7 @@ def fetch_actual_closes(symbol: str, pred_date: str, max_days: int = 14) -> tupl
 
     # 2. Fallback to raw API
     try:
-        if _is_hk_stock(symbol):
+        if is_hk_stock(symbol):
             import akshare as ak
             code = _hk_code(symbol)
             df = ak.stock_hk_daily(symbol=code, adjust="")

@@ -6,6 +6,7 @@ import logging
 from datetime import datetime
 
 import pandas as pd
+import requests
 
 from .data_source import get_index_history, get_index_realtime_quote
 from .indicators import calc_ma, calc_macd
@@ -165,7 +166,7 @@ def calculate_market_modifier(config: dict, intraday: bool = False) -> tuple[int
 
             name = INDEX_NAMES.get(code, code)
             results.append({"code": code, "name": name, "trend": trend, "strength": strength})
-        except Exception:
+        except (requests.RequestException, pd.errors.EmptyDataError, KeyError, ValueError, TypeError):
             logger.warning("Failed to fetch/calculate index trend for %s, defaulting to neutral", code)
             results.append({"code": code, "name": INDEX_NAMES.get(code, code), "trend": _TREND_IDX_NEUTRAL, "strength": 0.0})
 
