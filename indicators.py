@@ -236,8 +236,10 @@ def calc_volume_analysis(df: pd.DataFrame) -> pd.DataFrame:
     result = df.copy()
     volume = pd.to_numeric(result["volume"], errors="coerce")
 
-    vol_5d_avg = volume.rolling(window=5, min_periods=5).mean()
+    # 量比 = 当日成交量 / 前5日平均成交量（不含当天）
+    vol_5d_avg = volume.rolling(window=5, min_periods=1).mean().shift(1)
     vol_ratio = volume / vol_5d_avg.replace(0, np.nan)
+    vol_ratio = vol_ratio.fillna(1.0)
 
     result["vol_5d_avg"] = vol_5d_avg
     result["vol_ratio"] = vol_ratio

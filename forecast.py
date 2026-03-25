@@ -144,6 +144,61 @@ def _fetch_via_akshare_raw(full_code: str) -> pd.DataFrame | None:
         return None
 
 
+def _a_share_traded_minutes() -> int:
+    """Return elapsed trading minutes for A-share market today.
+
+    A-share: 9:30-11:30 (120 min) + 13:00-15:00 (120 min) = 240 min/day.
+    Morning break 10:15-10:30 is not counted.
+    """
+    now = datetime.now()
+    total_min = now.hour * 60 + now.minute
+
+    morning_open = 9 * 60 + 30     # 9:30
+    break_start = 10 * 60 + 15     # 10:15
+    break_end = 10 * 60 + 30       # 10:30
+    lunch_start = 11 * 60 + 30     # 11:30
+    lunch_end = 13 * 60            # 13:00
+    market_close = 15 * 60         # 15:00
+
+    if total_min <= morning_open:
+        return 0
+    if total_min <= break_start:
+        return total_min - morning_open
+    if total_min <= break_end:
+        return break_start - morning_open  # 45 min
+    if total_min <= lunch_start:
+        return (break_start - morning_open) + (total_min - break_end)  # 45 + (t-630)
+    if total_min <= lunch_end:
+        return 120  # full morning session
+    if total_min <= market_close:
+        return 120 + (total_min - lunch_end)
+    return 240  # full day
+
+
+def _hk_traded_minutes() -> int:
+    """Return elapsed trading minutes for HK market today.
+
+    HK market: 9:30-12:00 (150 min) + 13:00-16:00 (180 min) = 330 min/day.
+    """
+    now = datetime.now()
+    total_min = now.hour * 60 + now.minute
+
+    morning_open = 9 * 60 + 30    # 9:30
+    morning_close = 12 * 60        # 12:00
+    afternoon_open = 13 * 60       # 13:00
+    afternoon_close = 16 * 60      # 16:00
+
+    if total_min <= morning_open:
+        return 0
+    if total_min <= morning_close:
+        return total_min - morning_open
+    if total_min <= afternoon_open:
+        return morning_close - morning_open  # 150
+    if total_min <= afternoon_close:
+        return (morning_close - morning_open) + (total_min - afternoon_open)
+    return 330  # full day
+
+
 def analyze_stock(symbol: str, config: dict, refresh: bool = False):
     """Analyze a single stock and return (report_string, signal, score) or None on error."""
     try:
@@ -181,6 +236,27 @@ def analyze_stock(symbol: str, config: dict, refresh: bool = False):
                 _save_cache(df, _stock_cache_path(symbol))
 
     df = calc_all_indicators(df)
+
+    # During intraday, override calculated vol_ratio with time-adjusted value:
+    # - A-share: use Tencent API volume_ratio (field 49, exchange-provided)
+    # - HK stock: use Tencent API volume_ratio (field 50), fallback to time-adjusted calc
+    if intraday and realtime_data and realtime_data.get("volume_ratio") is not None:
+        df.iloc[-1, df.columns.get_loc("vol_ratio")] = realtime_data["volume_ratio"]
+    elif intraday and realtime_data:
+        from data_source import _is_hk_stock as _check_hk
+        rt_vol = realtime_data.get("volume", 0)
+        if rt_vol and rt_vol > 0 and len(df) >= 6:
+            prev5_avg = df.iloc[-6:-1]["volume"].astype(float).mean()
+            if prev5_avg > 0:
+                if _check_hk(symbol):
+                    traded_min = _hk_traded_minutes()
+                    total_min = 330
+                else:
+                    traded_min = _a_share_traded_minutes()
+                    total_min = 240
+                if traded_min > 0:
+                    vol_ratio = (rt_vol / traded_min) / (prev5_avg / total_min)
+                    df.iloc[-1, df.columns.get_loc("vol_ratio")] = round(vol_ratio, 2)
     raw_score, ind_results, trend_status = calculate_stock_score(df, config)
     modifier, market_results = calculate_market_modifier(config, intraday=intraday)
     final_score = max(-100, min(100, int(raw_score + modifier)))

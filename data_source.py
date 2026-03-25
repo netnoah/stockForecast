@@ -383,7 +383,7 @@ def _fetch_realtime_via_tencent(symbol: str) -> dict | None:
         #   0: unknown, 1: name, 2: code, 3: price, 4: prev_close,
         #   5: open, 6: volume(lots), ..., 30: timestamp,
         #   31: change_amount, 32: change_pct,
-        #   33: high, 34: low, ..., 36: volume(lots), 37: amount
+        #   33: high, 34: low, ..., 49: volume_ratio
         parts = content.split('"')
         if len(parts) < 2:
             return None
@@ -408,10 +408,65 @@ def _fetch_realtime_via_tencent(symbol: str) -> dict | None:
             "close": price,
             "prev_close": float(fields[4]) if fields[4] else None,
             "volume": volume,
+            "volume_ratio": float(fields[49]) if len(fields) > 49 and fields[49] else None,
             "date": fields[30] if len(fields) > 30 else "",
         }
         _record_success("tencent_realtime")
-        _logger.debug("Tencent quote for %s: %.2f", full_code, price)
+        _logger.debug("Tencent quote for %s: %.2f vol_ratio=%s", full_code, price, quote["volume_ratio"])
+        return quote
+    except Exception as exc:
+        _record_failure("tencent_realtime")
+        _logger.error("Tencent realtime fetch failed for %s: %s", symbol, exc)
+        return None
+
+
+def _fetch_hk_realtime_via_tencent(symbol: str) -> dict | None:
+    """Fetch HK stock real-time quote from Tencent Finance.
+
+    Returns dict with keys: date, open, high, low, close, prev_close, volume, volume_ratio, name.
+    Returns None on failure.
+    """
+    if not _is_hk_stock(symbol):
+        return None
+
+    code = _hk_code(symbol)
+    url = _TENCENT_REALTIME_URL.format(full_code=f"r_hk{code}")
+
+    try:
+        resp = _request_with_retry(url, _TENCENT_HEADERS)
+        resp.encoding = "gbk"
+        content = resp.text
+
+        parts = content.split('"')
+        if len(parts) < 2:
+            return None
+
+        fields = parts[1].split("~")
+        if len(fields) < 37:
+            return None
+
+        price = float(fields[3]) if fields[3] else None
+        if price is None or price <= 0:
+            return None
+
+        quote = {
+            "name": fields[1],
+            "open": float(fields[5]) if fields[5] else None,
+            "high": float(fields[33]) if fields[33] else None,
+            "low": float(fields[34]) if fields[34] else None,
+            "close": price,
+            "prev_close": float(fields[4]) if fields[4] else None,
+            "volume": float(fields[6]) if fields[6] else 0,
+            "volume_ratio": float(fields[50]) if len(fields) > 50 and fields[50] else None,
+            "date": fields[30] if len(fields) > 30 else "",
+        }
+        _record_success("tencent_hk_realtime")
+        _logger.debug("Tencent HK quote for %s: %.2f vol_ratio=%s", symbol, price, quote["volume_ratio"])
+        return quote
+    except Exception as exc:
+        _record_failure("tencent_hk_realtime")
+        _logger.error("Tencent HK realtime fetch failed for %s: %s", symbol, exc)
+        return None
         return quote
     except Exception as exc:
         _record_failure("tencent_realtime")
@@ -616,6 +671,11 @@ def get_realtime_quote(symbol: str) -> dict | None:
         Returns None if the quote cannot be retrieved.
     """
     if _is_hk_stock(symbol):
+        # HK: try Tencent first (has volume_ratio), fallback to Sina
+        if not _is_circuit_open("tencent_hk_realtime"):
+            quote = _fetch_hk_realtime_via_tencent(symbol)
+            if quote is not None:
+                return quote
         return _fetch_hk_realtime_via_sina(symbol)
 
     # A-share: try Tencent first, then Sina, respecting circuit breakers
