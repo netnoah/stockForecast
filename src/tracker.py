@@ -3,6 +3,10 @@ import logging
 import os
 from datetime import datetime
 
+from openpyxl import Workbook, load_workbook
+from openpyxl.styles import Font, PatternFill, Alignment, Border, Side
+from openpyxl.formatting.rule import CellIsRule
+
 # A股交易成本: 印花税0.05%(卖出) + 佣金约0.025%(买卖各一次) ≈ 0.1% 单边
 # 来回成本约 0.15%, 涨跌超过此阈值才算有效 hit
 _ROUND_TRIP_COST = 0.0015  # 0.15%
@@ -12,30 +16,214 @@ _HIT_DAY_COLUMNS = [f"hit{d}" for d in range(2, _MAX_TRACK_DAYS + 1)]
 _SUMMARY_MARKER = "===命中率==="
 _DATA_VERSION = 3  # Bump to force re-fill all hit columns
 
-_PREDICTIONS_FILE = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "data", "predictions.csv")
+_DATA_DIR = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "data")
+_PREDICTIONS_FILE = os.path.join(_DATA_DIR, "predictions.xlsx")
+_PREDICTIONS_CSV = os.path.join(_DATA_DIR, "predictions.csv")
 _FIELDS = ["date", "symbol", "name", "price", "signal", "score", "hit"] + _HIT_DAY_COLUMNS
 
 logger = logging.getLogger(__name__)
 
+# --- Excel styling constants ---
+_HEADER_FONT = Font(name="微软雅黑", bold=True, size=11, color="FFFFFF")
+_HEADER_FILL = PatternFill(start_color="4472C4", end_color="4472C4", fill_type="solid")
+_HEADER_ALIGNMENT = Alignment(horizontal="center", vertical="center")
+
+_HIT_FONT_HIT = Font(name="微软雅黑", size=10, color="006100")
+_HIT_FILL_HIT = PatternFill(start_color="C6EFCE", end_color="C6EFCE", fill_type="solid")
+
+_HIT_FONT_MISS = Font(name="微软雅黑", size=10, color="9C0006")
+_HIT_FILL_MISS = PatternFill(start_color="FFC7CE", end_color="FFC7CE", fill_type="solid")
+
+_SUMMARY_FONT = Font(name="微软雅黑", bold=True, size=10)
+_SUMMARY_FILL = PatternFill(start_color="FFF2CC", end_color="FFF2CC", fill_type="solid")
+
+_DATA_FONT = Font(name="微软雅黑", size=10)
+_DATA_ALIGNMENT = Alignment(vertical="center")
+_THIN_BORDER = Border(
+    left=Side(style="thin", color="D9D9D9"),
+    right=Side(style="thin", color="D9D9D9"),
+    top=Side(style="thin", color="D9D9D9"),
+    bottom=Side(style="thin", color="D9D9D9"),
+)
+
+_COLUMN_WIDTHS = {
+    "date": 13, "symbol": 10, "name": 10, "price": 10, "signal": 10,
+    "score": 8, "hit": 14,
+}
+_HIT_COL_WIDTH = 14
+_NAME_COL_WIDTH = 12  # wider for Chinese stock names
+
+
+def _migrate_csv_to_excel() -> None:
+    """Convert existing predictions.csv to predictions.xlsx, then rename CSV."""
+    if not os.path.exists(_PREDICTIONS_CSV):
+        return
+
+    try:
+        rows = []
+        for enc in ('utf-8-sig', 'utf-8', 'gbk', 'gb18030'):
+            try:
+                with open(_PREDICTIONS_CSV, 'r', newline='', encoding=enc) as f:
+                    rows = list(csv.DictReader(f))
+                break
+            except (UnicodeDecodeError, UnicodeError):
+                continue
+
+        if not rows:
+            os.remove(_PREDICTIONS_CSV)
+            return
+
+        # Convert to list of field dicts
+        cleaned = [{f: r.get(f, "") for f in _FIELDS} for r in rows]
+        _write_excel(cleaned)
+        os.remove(_PREDICTIONS_CSV)
+        logger.info("Migrated %d rows from predictions.csv to predictions.xlsx", len(cleaned))
+    except Exception as e:
+        logger.warning("Failed to migrate predictions.csv: %s", e)
+
 
 def _ensure_file() -> None:
     """Create directory and file with header if not exists."""
-    os.makedirs(os.path.dirname(_PREDICTIONS_FILE), exist_ok=True)
+    os.makedirs(_DATA_DIR, exist_ok=True)
 
+    if os.path.exists(_PREDICTIONS_FILE):
+        return
+
+    # Try migrating from CSV first
+    if os.path.exists(_PREDICTIONS_CSV):
+        _migrate_csv_to_excel()
+        return
+
+    # Create empty workbook with headers
+    wb = Workbook()
+    ws = wb.active
+    ws.title = "Predictions"
+    for col_idx, field in enumerate(_FIELDS, start=1):
+        cell = ws.cell(row=1, column=col_idx, value=field)
+        cell.font = _HEADER_FONT
+        cell.fill = _HEADER_FILL
+        cell.alignment = _HEADER_ALIGNMENT
+        cell.border = _THIN_BORDER
+        _set_col_width(ws, col_idx, field)
+    ws.freeze_panes = "A2"
+    ws.auto_filter.ref = f"A1:{_col_letter(len(_FIELDS))}1"
+    wb.save(_PREDICTIONS_FILE)
+
+
+def _col_letter(idx: int) -> str:
+    """Convert 1-based column index to Excel column letter(s)."""
+    result = ""
+    while idx > 0:
+        idx -= 1
+        result = chr(65 + (idx % 26)) + result
+        idx //= 26
+    return result
+
+
+def _set_col_width(ws, col_idx: int, field: str) -> None:
+    """Set column width based on field name."""
+    if field == "name":
+        ws.column_dimensions[_col_letter(col_idx)].width = _NAME_COL_WIDTH
+    elif field.startswith("hit"):
+        ws.column_dimensions[_col_letter(col_idx)].width = _HIT_COL_WIDTH
+    else:
+        ws.column_dimensions[_col_letter(col_idx)].width = _COLUMN_WIDTHS.get(field, 12)
+
+
+def _write_excel(rows: list[dict], summary_row: dict | None = None) -> None:
+    """Write rows to Excel with formatting. summary_row is appended if provided."""
+    wb = Workbook()
+    ws = wb.active
+    ws.title = "Predictions"
+
+    # Header
+    for col_idx, field in enumerate(_FIELDS, start=1):
+        cell = ws.cell(row=1, column=col_idx, value=field)
+        cell.font = _HEADER_FONT
+        cell.fill = _HEADER_FILL
+        cell.alignment = _HEADER_ALIGNMENT
+        cell.border = _THIN_BORDER
+        _set_col_width(ws, col_idx, field)
+
+    # Data rows
+    for row_idx, row in enumerate(rows, start=2):
+        for col_idx, field in enumerate(_FIELDS, start=1):
+            val = row.get(field, "")
+            # Try converting numeric strings
+            if field == "score" and val != "":
+                try:
+                    val = int(val)
+                except (ValueError, TypeError):
+                    pass
+            elif field == "price" and val != "":
+                try:
+                    val = float(val)
+                except (ValueError, TypeError):
+                    pass
+            cell = ws.cell(row=row_idx, column=col_idx, value=val)
+            cell.font = _DATA_FONT
+            cell.alignment = _DATA_ALIGNMENT
+            cell.border = _THIN_BORDER
+
+            # Apply hit/miss coloring to hit columns
+            if field in ("hit",) or field.startswith("hit"):
+                raw = str(val).strip()
+                hit_val = _parse_hit_value(raw)
+                if hit_val == "1":
+                    cell.font = _HIT_FONT_HIT
+                    cell.fill = _HIT_FILL_HIT
+                elif hit_val == "0":
+                    cell.font = _HIT_FONT_MISS
+                    cell.fill = _HIT_FILL_MISS
+
+    # Summary row
+    if summary_row:
+        summary_row_idx = len(rows) + 2
+        for col_idx, field in enumerate(_FIELDS, start=1):
+            val = summary_row.get(field, "")
+            cell = ws.cell(row=summary_row_idx, column=col_idx, value=val)
+            cell.font = _SUMMARY_FONT
+            cell.fill = _SUMMARY_FILL
+            cell.border = _THIN_BORDER
+
+    ws.freeze_panes = "A2"
+    ws.auto_filter.ref = f"A1:{_col_letter(len(_FIELDS))}1"
+    wb.save(_PREDICTIONS_FILE)
+
+
+def _read_excel() -> list[dict]:
+    """Read all data rows (excluding summary) from predictions.xlsx."""
     if not os.path.exists(_PREDICTIONS_FILE):
-        with open(_PREDICTIONS_FILE, 'w', newline='', encoding='utf-8-sig') as f:
-            writer = csv.DictWriter(f, fieldnames=_FIELDS)
-            writer.writeheader()
+        return []
+
+    wb = load_workbook(_PREDICTIONS_FILE)
+    ws = wb.active
+
+    rows = []
+    for row in ws.iter_rows(min_row=2, values_only=True):
+        if not any(v is not None and v != "" for v in row):
+            continue
+        row_dict = {}
+        for col_idx, field in enumerate(_FIELDS):
+            if col_idx < len(row) and row[col_idx] is not None:
+                val = row[col_idx]
+                row_dict[field] = str(val) if not isinstance(val, str) else val
+            else:
+                row_dict[field] = ""
+        rows.append(row_dict)
+
+    wb.close()
+    return rows
 
 
 def _write_predictions(predictions: list[dict]) -> None:
-    """Write all predictions to CSV, sorted by date descending, with accuracy summary row."""
+    """Write all predictions to Excel, sorted by date descending, with accuracy summary row."""
     _ensure_file()
     # Project each row onto _FIELDS, dropping legacy fields and filling missing ones
     cleaned = [{f: p.get(f, "") for f in _FIELDS} for p in predictions]
     sorted_preds = sorted(cleaned, key=lambda p: p["date"], reverse=True)
 
-    # Build summary row: date=marker with version, hit columns show accuracy
+    # Build summary row
     summary_row = {field: "" for field in _FIELDS}
     summary_row["date"] = f"{_SUMMARY_MARKER} v{_DATA_VERSION}"
     all_hit_cols = ["hit"] + _HIT_DAY_COLUMNS
@@ -45,16 +233,12 @@ def _write_predictions(predictions: list[dict]) -> None:
             hits = sum(1 for p in verified if _parse_hit_value(p.get(col, "")) == "1")
             summary_row[col] = f"{hits}/{len(verified)} ({hits / len(verified) * 100:.1f}%)"
 
-    with open(_PREDICTIONS_FILE, 'w', newline='', encoding='utf-8-sig') as f:
-        writer = csv.DictWriter(f, fieldnames=_FIELDS)
-        writer.writeheader()
-        writer.writerows(sorted_preds)
-        writer.writerow(summary_row)
+    _write_excel(sorted_preds, summary_row)
 
 
 def record_prediction(symbol: str, name: str, price: float, signal: str, score: int) -> None:
     """
-    Write a prediction to predictions.csv.
+    Write a prediction to predictions.xlsx.
 
     Deduplicates: same day + same stock keeps only the latest prediction.
     File is sorted by date descending (newest first).
@@ -101,7 +285,7 @@ def _migrate_predictions(predictions: list[dict], fetch_name_fn) -> list[dict]:
 
 
 def _migrate_hit_columns(predictions: list[dict]) -> list[dict]:
-    """Backfill missing hit2-hit14 columns for old CSV records."""
+    """Backfill missing hit2-hit14 columns for old records."""
     changed = False
     for pred in predictions:
         for col in _HIT_DAY_COLUMNS:
@@ -115,7 +299,7 @@ def _migrate_hit_columns(predictions: list[dict]) -> list[dict]:
 
 def read_predictions() -> list[dict]:
     """
-    Read all rows from predictions.csv as list of dicts.
+    Read all rows from predictions.xlsx as list of dicts.
 
     Deduplicates same-day same-stock entries, keeping the last one.
     Returns:
@@ -126,14 +310,7 @@ def read_predictions() -> list[dict]:
     if not os.path.exists(_PREDICTIONS_FILE):
         return []
 
-    predictions = []
-    for enc in ('utf-8-sig', 'utf-8', 'gbk', 'gb18030'):
-        try:
-            with open(_PREDICTIONS_FILE, 'r', newline='', encoding=enc) as f:
-                predictions = list(csv.DictReader(f))
-            break
-        except (UnicodeDecodeError, UnicodeError):
-            continue
+    predictions = _read_excel()
 
     # Extract and filter out summary row; check data version
     summary_version = None
@@ -141,7 +318,6 @@ def read_predictions() -> list[dict]:
     for p in predictions:
         date_val = p.get("date", "")
         if date_val.startswith(_SUMMARY_MARKER):
-            # Extract version: "===命中率=== v2"
             parts = date_val.split(" v")
             if len(parts) == 2:
                 try:
@@ -213,7 +389,6 @@ def backfill_predictions(fetch_actual_fn) -> int:
         signal = pred["signal"]
 
         # Determine which days still need filling
-        # Old format ("0"/"1") or empty is considered unfilled
         all_hit_cols = ["hit"] + _HIT_DAY_COLUMNS
         last_filled = 0
         for d, col in enumerate(all_hit_cols, start=1):
@@ -227,14 +402,12 @@ def backfill_predictions(fetch_actual_fn) -> int:
         if start_day > _MAX_TRACK_DAYS:
             continue  # All 14 days already filled
 
-        # Fetch base close and subsequent closes from data source
         max_days_needed = _MAX_TRACK_DAYS
         base_close, closes = fetch_actual_fn(symbol, pred_date, max_days_needed)
 
         if base_close is None or not closes:
             continue
 
-        # Fill each day using base_close from data source as reference price
         for d in range(start_day, _MAX_TRACK_DAYS + 1):
             day_idx = d - 1
             if day_idx >= len(closes) or closes[day_idx] is None:
@@ -251,7 +424,6 @@ def backfill_predictions(fetch_actual_fn) -> int:
             if d == 1:
                 backfill_count += 1
 
-    # Always rewrite to keep summary row up-to-date
     _write_predictions(predictions)
 
     logger.info("Backfill complete: %d records backfilled out of %d total", backfill_count, len(predictions))
@@ -298,7 +470,7 @@ def _parse_hit_change(raw: str) -> float | None:
 
 
 def _normalize_signal(signal: str) -> str:
-    """Normalize English signal names from old CSV data to Chinese."""
+    """Normalize English signal names from old data to Chinese."""
     _en_to_cn = {
         "Strong Buy": "强烈买入",
         "Buy": "买入",
@@ -365,7 +537,6 @@ def calculate_accuracy() -> dict:
             "by_day": {},
         }
 
-    # Filter predictions with actual results
     verified = [p for p in predictions if _parse_hit_value(p.get("hit", ""))]
 
     total = len(predictions)
@@ -384,11 +555,9 @@ def calculate_accuracy() -> dict:
             "by_day": {},
         }
 
-    # Calculate overall accuracy
     hits = sum(1 for p in verified if _parse_hit_value(p["hit"]) == "1")
     overall = (hits / verified_count) * 100
 
-    # Calculate profit/loss ratio from directional signals (exclude 观望)
     directional = [p for p in verified if _normalize_signal(p["signal"]) != "观望"]
 
     win_changes = []
@@ -415,7 +584,6 @@ def calculate_accuracy() -> dict:
     else:
         profit_loss_ratio = None
 
-    # Expectancy = hit_rate * avg_profit - miss_rate * avg_loss
     if directional and avg_profit is not None:
         dir_hits = sum(1 for p in directional if _parse_hit_value(p["hit"]) == "1")
         dir_total = len(directional)
@@ -426,7 +594,6 @@ def calculate_accuracy() -> dict:
     else:
         expectancy = None
 
-    # Calculate by signal
     signals = ["强烈买入", "买入", "观望", "卖出", "强烈卖出"]
     by_signal = {}
 
@@ -441,7 +608,6 @@ def calculate_accuracy() -> dict:
                 "accuracy": (signal_hits / signal_total) * 100,
             }
 
-    # Calculate by day (day 1 through day 14)
     by_day = {}
     for d in range(1, _MAX_TRACK_DAYS + 1):
         col = "hit" if d == 1 else f"hit{d}"
@@ -500,7 +666,6 @@ def format_accuracy_report(stats: dict) -> str:
     lines.append(f"整体准确率: {hits}/{verified} ({overall:.1f}%)")
     lines.append(f"交易成本阈值: {_ROUND_TRIP_COST * 100:.2f}%")
 
-    # Profit/loss ratio
     avg_profit = stats.get("avg_profit")
     avg_loss = stats.get("avg_loss")
     pl_ratio = stats.get("profit_loss_ratio")
@@ -522,14 +687,12 @@ def format_accuracy_report(stats: dict) -> str:
             lines.append(f"单笔期望收益: {exp_sign}{expectancy:.3f}%")
     lines.append("")
 
-    # Format each signal
     for signal, signal_stats in stats['by_signal'].items():
         signal_hits = signal_stats['hits']
         signal_total = signal_stats['total']
         accuracy = signal_stats['accuracy']
         lines.append(f"  {signal} 准确率: {signal_hits}/{signal_total} ({accuracy:.1f}%)")
 
-    # Multi-day accuracy (only show days 1, 2, 5, 14)
     by_day = stats.get("by_day", {})
     if by_day:
         lines.append("")
